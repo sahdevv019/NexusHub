@@ -1376,7 +1376,7 @@ function feedbackAdmin() {
           <div>
             <strong>${esc(f.userName || 'User')}</strong> <span style="color:#059669;">${'★'.repeat(f.rating)}</span>
             <p style="margin:4px 0;">${esc(f.message || 'No written text')}</p>
-            <span class="hint">${esc(f.userEmail \vert{}\vert{} '')} ·${new Date(f.createdAt).toLocaleString()}</span>
+            <span class="hint">${esc(f.userEmail || '')} ·${new Date(f.createdAt).toLocaleString()}</span>
           </div>
           <button class="btn small danger" onclick="deleteFeedback('${f.id}')">Delete</button>
         </article>

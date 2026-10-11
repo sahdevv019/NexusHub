@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NexusHub — Ideas become things</title>
+  <link rel="stylesheet" href="style.css">
+
+  <!-- Firebase v10 Compat -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  
+  <div id="lightbox" class="modal hidden" onclick="closeLightbox()">
+    <button class="btn">Close ✕</button>
+    <img id="lightboximg" alt="">
+  </div>
+  
+  <div id="projectmodal" class="modal hidden" onclick="if(event.target===this)closeProjectModal()">
+    <div class="modal-panel">
+      <button class="btn modal-close" onclick="closeProjectModal()">Close ✕</button>
+      <div id="projectmodalcontent"></div>
+    </div>
+  </div>
+
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyDsy_BaW1gzwm9aiiFC-bgzjXKbG2hUqHg",
+  authDomain: "nexushub-955d4.firebaseapp.com",
+  projectId: "nexushub-955d4",
+  storageBucket: "nexushub-955d4.firebasestorage.app",
+  messagingSenderId: "629312566582",
+  appId: "1:629312566582:web:55eea7f47b6aa4f875af97"
+};
+const OWNER_EMAIL = "ayushpathak200718@gmail.com";
+let authInstance = null, dbInstance = null, isFirebaseReady = false;
+
+try {
+  firebase.initializeApp(firebaseConfig);
+  authInstance = firebase.auth();
+  dbInstance = firebase.firestore();
+  isFirebaseReady = true;
+} catch (e) {
+  console.warn("Firebase fallback mode", e);
+}
+
+let data = {
+  projects: [],
+  feedback: [],
+  feedbackDraftRating: 0,
+  selectedEmoji: null,
+  categories: ['Web Apps', 'Developer Tools', '3D & Graphics', 'Experiments'],
+  settings: {
+    siteName: 'NexusHub',
+    heroHeading: 'Ideas become things.',
+    heroDescription: 'A growing collection of digital tools, web apps, and experiments built by Ayush.',
+    aboutText: 'I’m a developer focused on turning ideas into real, functional digital experiences.',
+    instagram: 'https://www.instagram.com/bob.builder19/',
+    email: OWNER_EMAIL
+  },
+  editId: null
+};
+
+const authState = {
+  user: null,
+  init() {
+    if (isFirebaseReady) {
+      authInstance.onAuthStateChanged(async firebaseUser => {
+        if (firebaseUser) {
+          let isOwner = (firebaseUser.email || '').toLowerCase().trim() === OWNER_EMAIL.toLowerCase().trim();
+          let userDoc = await dbInstance.collection('users').doc(firebaseUser.uid).get();
+          let profileData = userDoc.data();
+          
+          if (!profileData) {
+            profileData = {
+              username: isOwner ? 'Ayush' : 'User' + Math.floor(Math.random() * 10000),
+              username_lower: isOwner ? 'ayush' : ('user' + Math.floor(Math.random() * 10000)),
+              emoji: isOwner ? '👑' : '👾',
+              email: firebaseUser.email,
+              createdAt: new Date().toISOString()
+            };
+            await dbInstance.collection('users').doc(firebaseUser.uid).set(profileData);
+          }
+
+          this.user = {
+            uid: firebaseUser.uid,
+            name: profileData.username,
+            email: firebaseUser.email,
+            picture: profileData.emoji,
+            isOwner: isOwner
+          };
+        } else {
+          this.user = null;
+        }
+        render();
+      });
+    }
+  },
+  async loginWithGoogle() {
+    if (isFirebaseReady) {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      try {
+        await authInstance.signInWithPopup(provider);
+        toast(`Signed in successfully!`);
+        goto('profile');
+      } catch (error) {
+        toast(error.message, true);
+      }
+    }
+  },
+  async logout() {
+    if (isFirebaseReady) await authInstance.signOut();
+    this.user = null;
+    toast('Signed out successfully.');
+    goto('');
+  }
+};
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const slug = s => String(s || 'project').toLowerCase().trim().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 70) || 'project';
+
+function getAvatarHTML(pic, size = 34, fontSize = 20) {
+  if (!pic) return `<div class="comment-avatar" style="width:${size}px;height:${size}px;display:grid;place-items:center;font-weight:700;font-size:${fontSize}px;border-radius:50%;">U</div>`;
+  if (!pic.startsWith('http')) {
+    return `<div class="comment-avatar" style="width:${size}px;height:${size}px;display:grid;place-items:center;font-size:${fontSize}px;background:var(--line);border-radius:50%;">${pic}</div>`;
+  }
+  return `<img src="${pic}" class="comment-avatar" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" alt="Avatar">`;
+}
+
+async function loadData() {
+  if (isFirebaseReady) {
+    try {
+      const pSnap = await dbInstance.collection('projects').orderBy('createdAt', 'desc').get();
+      data.projects = pSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+      const fSnap = await dbInstance.collection('feedback').orderBy('createdAt', 'desc').get();
+      data.feedback = fSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    } catch(e) {
+      console.warn("Could not fetch remote documents.", e);
+    }
+  }
+}
+
+function toast(msg, err = false) {
+  let t = $('#toast');
+  if(!t) return;
+  t.textContent = msg;
+  t.style.borderColor = err ? '#ef4444' : '#171717';
+  t.style.background = err ? '#fef2f2' : '#171717';
+  t.style.color = err ? '#991b1b' : '#ffffff';
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+function currentRoute() { return location.hash.replace(/^#\/?/, '') || 'home'; }
+function goto(route) { location.hash = '/' + route; }
+function isAdminRoute(r) { return r === 'admin' || r.startsWith('admin/'); }
+
+function nav() {
+  let userSection = '', mobileProfilePill = '';
+  if (authState.user) {
+    mobileProfilePill = `<a class="mobile-top-profile" href="#/profile">${getAvatarHTML(authState.user.picture, 28, 16)}</a>`;
+    userSection = `
+      <a class="nav-user-pill" href="#/profile" style="background:#f9f8f3;">
+        ${getAvatarHTML(authState.user.picture, 26, 15)}
+        <span>${esc(authState.user.name.split(' ')[0])}</span>
+        ${authState.user.isOwner ? `<span class="badge-role owner" style="padding:1px 6px;font-size:9px;">Owner</span>` : ''}
+      </a>
+      ${authState.user.isOwner ? `<a class="btn small primary" href="#/admin/projects/new">＋ Add project</a><a class="btn small" href="#/admin">Dashboard ↗</a>` : ''}
+    `;
+  } else {
+    mobileProfilePill = `<button class="btn small primary" style="padding: 4px 10px; font-size: 11px;" onclick="authState.loginWithGoogle()">Sign In</button>`;
+    userSection = `<button class="btn small primary" onclick="authState.loginWithGoogle()">Sign in with Google</button>`;
+  }
+
+  return `
+    <header class="topbar">
+      <div class="wrap nav">
+        <div style="display:flex; align-items:center; gap:10px;">
+          ${mobileProfilePill}
+          <a class="brand" href="#top"><span class="brandmark">N</span><span>${esc(data.settings.siteName)}</span></a>
+        </div>
+        <nav class="navlinks">
+          <a href="#top">Home</a>
+          <a href="#projects">Explore</a>
+          <a href="#categories">Categories</a>
+          <a href="#about">About</a>
+          ${userSection}
+        </nav>
+      </div>
+    </header>
+  `;
+}
+
+function footer() {
+  return `
+    <footer class="footer">
+      <div class="wrap footer-shell">
+        <div class="footer-bottom">
+          <span>© ${new Date().getFullYear()} ${esc(data.settings.siteName)}. All rights reserved.</span>
+          <div class="footer-legal">
+            <button type="button" onclick="alert('NexusHub Privacy Policy: We protect your data and store only essential authentication credentials.')">Privacy Policy</button>
+            <button type="button" onclick="alert('NexusHub Terms: All projects are property of their respective creators.')">Terms of Service</button>
+          </div>
+        </div>
+      </div>
+    </footer>
+  `;
+}
+
+function imageMarkup(src, alt) { 
+  return src ? `<img src="${src}" alt="${esc(alt || 'Thumbnail')}" loading="lazy">` : `<div class="coverplaceholder">N.</div>`; 
+}
+
+function projectFeedback(p) { return (data.feedback || []).filter(f => f.projectId === p.id); }
+
+function getRatingUI(p) {
+  let fs = projectFeedback(p);
+  if (!fs.length) return `<div class="playstore-rating"><span style="color:var(--muted)">★</span><span>No reviews yet</span></div>`;
+  let avg = (fs.reduce((n, f) => n + Number(f.rating || 0), 0) / fs.length).toFixed(1);
+  return `<div class="playstore-rating"><span class="score">${avg}</span><span class="star">★</span><span>(${fs.length})</span></div>`;
+}
+
+function card(p) {
+  return `
+    <article class="project-card">
+      <a href="#projects" onclick="openProjectDetail('${esc(p.slug)}');return false">
+        <div class="cover">${p.cover ? imageMarkup(p.cover, p.name) : `<div class="coverplaceholder">${esc(p.name.slice(0, 2).toUpperCase())}</div>`}</div>
+      </a>
+      <div class="cardbody">
+        <span class="pill">${esc(p.category || 'General')}</span>
+        <h3><a href="#projects" onclick="openProjectDetail('${esc(p.slug)}');return false">${esc(p.name)}</a></h3>
+        ${getRatingUI(p)}
+        <p>${esc(p.description)}</p>
+        <div class="cardactions">
+          <button class="btn small" onclick="openProjectDetail('${esc(p.slug)}')">Details</button>
+          ${p.liveUrl ? `<a class="btn primary small" href="${esc(p.liveUrl)}" target="_blank" rel="noopener noreferrer">Launch ↗</a>` : ''}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function visibleProjects() { return data.projects.filter(p => p.visibility === 'published'); }
+
+function home() {
+  let ps = visibleProjects();
+  return `
+    ${nav()}
+    <main id="top">
+      <section class="wrap hero">
+        <div>
+          <span class="eyebrow"><i class="dot"></i> Engineering & Projects</span>
+          <h1>${esc(data.settings.heroHeading)}</h1>
+          <p>${esc(data.settings.heroDescription)}</p>
+          <div class="heroactions"><a class="btn primary" href="#projects">Explore work ↓</a></div>
+        </div>
+      </section>
+      
+      <section class="section page-anchor" id="projects">
+        <div class="wrap">
+          <div class="sectionhead">
+            <div><span class="kicker">Portfolio</span><h2>Projects</h2></div>
+          </div>
+          <div class="grid" id="exploregrid">
+            ${ps.length ? ps.map(card).join('') : '<div class="empty"><strong>No projects listed yet.</strong></div>'}
+          </div>
+        </div>
+      </section>
+    </main>
+    ${footer()}
+  `;
+}
+
+function profilePage() {
+  if (!authState.user) { authState.loginWithGoogle(); return ''; }
+  const userReviews = (data.feedback || []).filter(f => f.userId === authState.user.uid);
+  const emojis = ['👽','👻','🤖','👾','🦊','🐼','🦁','🐯','🐸','🐙','🦖','🦄','😎','👑'];
+
+  return `
+    ${nav()}
+    <main class="wrap" style="padding: 40px 0 80px;">
+      <div class="profile-card">
+        <div class="profile-header">
+          ${getAvatarHTML(authState.user.picture, 88, 50)}
+          <div class="profile-info" style="flex: 1;">
+            <h1>${esc(authState.user.name)}</h1>
+            <p class="profile-email">${esc(authState.user.email)}</p>
+            <span class="badge-role owner">${authState.user.isOwner ? '★ Owner' : 'Contributor'}</span>
+          </div>
+          <button class="btn danger" onclick="authState.logout()">Sign Out</button>
+        </div>
+
+        <div style="margin-top: 24px; padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: #faf9f5;">
+          <h3 style="margin: 0 0 16px;">Edit Profile</h3>
+          <div style="display:flex; gap: 8px; flex-wrap: wrap; margin-bottom:16px;">
+            ${emojis.map(e => `<button type="button" onclick="data.selectedEmoji='${e}';saveProfileData();" class="btn small" style="font-size:20px;">${e}</button>`).join('')}
+          </div>
+          <input id="edit-username-input" class="field" value="${esc(authState.user.name)}" maxlength="20" placeholder="Username">
+          <button class="btn primary" style="margin-top:10px;" onclick="saveProfileData()">Save Username</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 36px;">
+        <h2>My Reviews (${userReviews.length})</h2>
+        ${userReviews.map(r => `
+          <div style="background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:12px; display:flex; justify-content:space-between;">
+            <div><strong>Rating: ${r.rating}★</strong><p style="margin:4px 0 0;">${esc(r.message)}</p></div>
+            <button class="btn small danger" onclick="deleteUserReview('${r.id}')">Delete</button>
+          </div>
+        `).join('')}
+      </div>
+    </main>
+    ${footer()}
+  `;
+}
+
+async function saveProfileData() {
+  let newName = $('#edit-username-input')?.value.trim() || authState.user.name;
+  let newEmoji = data.selectedEmoji || authState.user.picture;
+  if (isFirebaseReady) {
+    await dbInstance.collection('users').doc(authState.user.uid).update({ username: newName, emoji: newEmoji });
+  }
+  authState.user.name = newName;
+  authState.user.picture = newEmoji;
+  toast('Profile updated!');
+  render();
+}
+
+async function deleteUserReview(id) {
+  if (isFirebaseReady) await dbInstance.collection('feedback').doc(id).delete();
+  data.feedback = data.feedback.filter(f => f.id !== id);
+  toast('Review deleted.');
+  render();
+}
+
+function openProjectDetail(projectSlug) {
+  let p = visibleProjects().find(x => x.slug === projectSlug);
+  if (!p) return;
+  let fs = projectFeedback(p);
+  
+  $('#projectmodalcontent').innerHTML = `
+    <h1>${esc(p.name)}</h1>
+    <p>${esc(p.description)}</p>
+    ${p.liveUrl ? `<a class="btn primary" href="${esc(p.liveUrl)}" target="_blank" style="display:block;text-align:center;margin-bottom:20px;">Launch Project ↗</a>` : ''}
+    <h3>Reviews</h3>
+    ${authState.user ? `
+      <form onsubmit="event.preventDefault();submitFeedback('${p.id}')">
+        <select id="newrating" class="field" style="margin-bottom:10px;"><option value="5">5 Stars</option><option value="4">4 Stars</option><option value="3">3 Stars</option><option value="2">2 Stars</option><option value="1">1 Star</option></select>
+        <textarea id="newmsg" class="field" placeholder="Write review..." style="margin-bottom:10px;"></textarea>
+        <button class="btn primary" type="submit">Post Review</button>
+      </form>
+    ` : '<p>Sign in to review.</p>'}
+    <div style="margin-top:20px;">
+      ${fs.map(f => `<div style="border-top:1px solid var(--line);padding:10px 0;"><strong>${esc(f.userName)}</strong> (${f.rating}★)<p style="margin:4px 0 0;">${esc(f.message)}</p></div>`).join('')}
+    </div>
+  `;
+  $('#projectmodal').classList.remove('hidden');
+}
+
+function closeProjectModal() { $('#projectmodal').classList.add('hidden'); }
+
+async function submitFeedback(projectId) {
+  if (!authState.user) return;
+  let rating = Number($('#newrating').value);
+  let message = $('#newmsg').value.trim();
+  let newReview = { projectId, userId: authState.user.uid, rating, message, userName: authState.user.name, userPhoto: authState.user.picture, createdAt: new Date().toISOString() };
+  
+  if (isFirebaseReady) {
+    let ref = await dbInstance.collection('feedback').add(newReview);
+    newReview.id = ref.id;
+  }
+  data.feedback.unshift(newReview);
+  toast('Review posted!');
+  openProjectDetail(visibleProjects().find(x => x.id === projectId).slug);
+}
+
+function adminShell(content) {
+  return `<div class="wrap" style="padding:40px 0;"><a class="btn" href="#">← Home</a><div style="margin-top:20px;">${content}</div></div>`;
+}
+
+function dashboard() {
+  return adminShell(`
+    <h1>Admin Dashboard</h1>
+    <a class="btn primary" href="#/admin/new" style="margin:20px 0;display:inline-block;">＋ New Project</a>
+    <table>
+      ${data.projects.map(p => `<tr><td>${esc(p.name)}</td><td><button class="btn small danger" onclick="deleteProj('${p.id}')">Delete</button></td></tr>`).join('')}
+    </table>
+  `);
+}
+
+function projectForm() {
+  return adminShell(`
+    <h1>Add Project</h1>
+    <form onsubmit="event.preventDefault();saveProj()">
+      <input class="field" id="aname" placeholder="Title" required style="margin-bottom:12px;">
+      <input class="field" id="adesc" placeholder="Description" required style="margin-bottom:12px;">
+      <input class="field" id="alive" placeholder="Live URL" style="margin-bottom:12px;">
+      <button class="btn primary" type="submit">Publish</button>
+    </form>
+  `);
+}
+
+async function saveProj() {
+  let name = $('#aname').value.trim();
+  let description = $('#adesc').value.trim();
+  let liveUrl = $('#alive').value.trim();
+  let obj = { name, slug: slug(name), description, liveUrl, visibility: 'published', category: 'Web Apps', tags: [], screenshots: [], cover: '', createdAt: new Date().toISOString() };
+  
+  if (isFirebaseReady) {
+    let ref = await dbInstance.collection('projects').add(obj);
+    obj.id = ref.id;
+  }
+  data.projects.unshift(obj);
+  toast('Project published!');
+  goto('');
+}
+
+async function deleteProj(id) {
+  if (isFirebaseReady) await dbInstance.collection('projects').doc(id).delete();
+  data.projects = data.projects.filter(x => x.id !== id);
+  render();
+}
+
+function render() {
+  let r = currentRoute();
+  if (r === 'profile') { $('#app').innerHTML = profilePage(); return; }
+  if (r === 'admin') { $('#app').innerHTML = dashboard(); return; }
+  if (r === 'admin/new') { $('#app').innerHTML = projectForm(); return; }
+  
+  $('#app').innerHTML = home();
+  if (r.startsWith('projects/')) setTimeout(() => openProjectDetail(decodeURIComponent(r.slice(9))), 0);
+}
+
+window.addEventListener('hashchange', render);
+
+(async () => {
+  await loadData();
+  authState.init();
+  render();
+})();
+</script>
+</body>
+</html>

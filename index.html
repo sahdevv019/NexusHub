@@ -3,8 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f9f8f3">
+  <meta name="theme-color" content="#F7F6F2">
+  <meta name="description" content="NexusHub — A curated portfolio and project showcase of web applications, developer utilities, and interactive experiments built by Ayush.">
   <title>NexusHub — Ideas become things</title>
+
+  <!-- Open Graph / Meta -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://nexushub-955d4.firebaseapp.com/">
+  <meta property="og:title" content="NexusHub — Ideas become things">
+  <meta property="og:description" content="A curated developer portfolio and showcase of web apps, developer tools, and digital experiments built by Ayush.">
+  <meta property="og:site_name" content="NexusHub">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="NexusHub — Ideas become things">
+  <meta name="twitter:description" content="A curated developer portfolio and showcase of web apps, developer tools, and digital experiments built by Ayush.">
+
+  <!-- Favicon (Inline SVG Data URI) -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2324745B'/%3E%3Cpath d='M8 24V8h3.5l8.5 11.5V8H24v16h-3.5L12 12.5V24H8z' fill='%23FFFFFF'/%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 
   <!-- Firebase App & Services (v10 Compat) -->
@@ -21,7 +41,7 @@
     <img id="lightboximg" alt="">
   </div>
   
-  <div id="projectmodal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Project details">
+  <div id="projectmodal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Project details" aria-labelledby="modal-project-title">
     <div class="modal-panel">
       <button class="btn modal-close" onclick="closeProjectModal()">Close ✕</button>
       <div id="projectmodalcontent"></div>
@@ -42,6 +62,7 @@ const OWNER_EMAIL = "ayushpathak200718@gmail.com";
 let authInstance = null;
 let dbInstance = null;
 let isFirebaseReady = false;
+let isOfflineMode = false;
 
 try {
   firebase.initializeApp(firebaseConfig);
@@ -49,12 +70,13 @@ try {
   dbInstance = firebase.firestore();
   isFirebaseReady = true;
 } catch (e) {
-  console.warn("Firebase initialization skipped. Using local cache fallback.", e);
+  console.warn("Firebase initialization skipped. Operating in offline cached mode.", e);
+  isOfflineMode = true;
 }
 
 const DB_NAME = 'nexushub-production-v1';
 const STORE = 'records';
-let localDb;
+let localDb = null;
 
 let data = {
   projects: [],
@@ -73,80 +95,136 @@ let data = {
   editId: null
 };
 
+// URL validation helper to prevent javascript: or malformed links
+function sanitizeUrl(url) {
+  if (!url) return '';
+  const s = String(url).trim();
+  if (/^https?:\/\/[^\s<>"']+$/i.test(s)) {
+    return s;
+  }
+  return '';
+}
+
+// Neutral SVG fallback image to prevent broken image icons (Milestone 6)
+const FALLBACK_IMAGE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 450' fill='%23E9EEE8'%3E%3Crect width='800' height='450' fill='%23F0F3EF'/%3E%3Cg fill='%2324745B' opacity='0.3'%3E%3Crect x='340' y='170' width='120' height='80' rx='12'/%3E%3Ccircle cx='375' cy='195' r='12'/%3E%3Cpath d='M348 238l30-30 20 20 25-25 29 35z'/%3E%3C/g%3E%3Ctext x='400' y='285' fill='%2366736C' font-family='system-ui, sans-serif' font-size='15' font-weight='600' text-anchor='middle'%3ENo Image Available%3C/text%3E%3C/svg%3E";
+
+// Validate static image path or legacy/external HTTPS image URL (Milestone 6)
+function validateImagePath(path) {
+  if (!path || typeof path !== 'string') return { valid: false, error: 'Path cannot be empty.' };
+  const s = path.trim();
+  if (/^(javascript|vbscript|data):/i.test(s)) {
+    return { valid: false, error: 'Dangerous URI schemes (javascript:, data:) are disallowed.' };
+  }
+  if (/\.\.[\/\\]/.test(s)) {
+    return { valid: false, error: 'Path traversal (..) is not allowed.' };
+  }
+  // Allow root-relative static asset path (/assets/projects/...) or standard HTTP(S) URL
+  if (/^https?:\/\/[^\s<>"']+$/i.test(s) || /^\/?assets\/[a-zA-Z0-9_\-\.\/]+$/i.test(s)) {
+    return { valid: true, path: s.startsWith('assets/') ? '/' + s : s };
+  }
+  return { valid: false, error: 'Please enter a valid static path (/assets/projects/...) or https:// URL.' };
+}
+
+// Safely resolve image paths (supporting root-relative /assets/..., legacy Firebase Storage URLs, and external https://)
+function resolveImageUrl(path) {
+  if (!path || typeof path !== 'string') return '';
+  const s = path.trim();
+  if (/^(javascript|vbscript):/i.test(s)) return '';
+  if (/^data:/i.test(s) && !s.startsWith('data:image/svg+xml')) return '';
+  if (/\.\.[\/\\]/.test(s)) return '';
+  if (s.startsWith('assets/')) return '/' + s;
+  return s;
+}
+
+// Check if a URL belongs to our Firebase Storage bucket (preserved for backward compatibility)
+function isFirebaseStorageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  return url.includes('firebasestorage.googleapis.com') ||
+         url.includes('firebasestorage.app') ||
+         (typeof firebaseConfig !== 'undefined' && firebaseConfig.storageBucket && url.includes(firebaseConfig.storageBucket));
+}
+
 const authState = {
   user: null,
   init() {
-    if (isFirebaseReady) {
-      authInstance.onAuthStateChanged(async firebaseUser => {
+    if (isFirebaseReady && authInstance) {
+      authInstance.onAuthStateChanged(async (firebaseUser) => {
         if (firebaseUser) {
-          let isOwner = (firebaseUser.email || '').toLowerCase().trim() === OWNER_EMAIL.toLowerCase().trim();
-          let userDoc = await dbInstance.collection('users').doc(firebaseUser.uid).get();
-          let profileData = userDoc.data();
+          const userEmail = (firebaseUser.email || '').toLowerCase().trim();
+          const isOwner = userEmail === OWNER_EMAIL.toLowerCase().trim() && (firebaseUser.emailVerified || (firebaseUser.providerData && firebaseUser.providerData.some(p => p.providerId === 'google.com')));
           
+          let profileData = null;
+          try {
+            const userDoc = await dbInstance.collection('users').doc(firebaseUser.uid).get();
+            profileData = userDoc.data();
+          } catch (e) {
+            console.warn("Could not fetch user profile document:", e);
+          }
+
           if (!profileData) {
             profileData = {
-              username: isOwner ? 'Ayush' : 'User' + Math.floor(Math.random() * 10000),
-              username_lower: isOwner ? 'ayush' : ('user' + Math.floor(Math.random() * 10000)),
+              username: isOwner ? 'Ayush' : 'User' + Math.floor(1000 + Math.random() * 9000),
+              username_lower: isOwner ? 'ayush' : ('user' + Math.floor(1000 + Math.random() * 9000)),
               emoji: isOwner ? '👑' : '👾',
-              email: firebaseUser.email,
+              email: userEmail,
               createdAt: new Date().toISOString()
             };
-            await dbInstance.collection('users').doc(firebaseUser.uid).set(profileData);
+            try {
+              await dbInstance.collection('users').doc(firebaseUser.uid).set(profileData);
+            } catch (e) {
+              console.warn("Could not initialize profile document in Firestore:", e);
+            }
           }
 
           this.user = {
             uid: firebaseUser.uid,
             name: profileData.username,
-            email: firebaseUser.email,
+            email: userEmail,
             picture: profileData.emoji,
             isOwner: isOwner
           };
+
+          // If owner signs in, retrieve drafts and all projects (Requirement A.2)
+          if (isOwner) {
+            await loadOwnerProjects();
+          }
         } else {
           this.user = null;
         }
         render();
       });
     } else {
-      const saved = localStorage.getItem('nexushub_user');
-      if (saved) {
-        try {
-          this.user = JSON.parse(saved);
-          this.user.isOwner = (this.user.email || '').toLowerCase().trim() === OWNER_EMAIL.toLowerCase().trim();
-        } catch(e) {}
-      }
+      // In offline mode without Firebase, mock logins are strictly disabled
+      this.user = null;
     }
   },
   async loginWithGoogle() {
-    if (isFirebaseReady) {
-      const provider = new firebase.auth.GoogleAuthProvider();
-      try {
-        await authInstance.signInWithPopup(provider);
-        toast(`Signed in successfully!`);
-        goto('profile');
-      } catch (error) {
-        toast(error.message, true);
-      }
-    } else {
-      const mockEmail = prompt("Enter your Google email to test login locally:", OWNER_EMAIL);
-      if (!mockEmail) return;
-      let isOwner = mockEmail.toLowerCase().trim() === OWNER_EMAIL.toLowerCase().trim();
-      this.user = {
-        uid: "local_" + btoa(mockEmail).substring(0, 10),
-        name: isOwner ? 'Ayush' : 'User' + Math.floor(Math.random() * 10000),
-        email: mockEmail,
-        picture: isOwner ? '👑' : '👾',
-        isOwner: isOwner
-      };
-      localStorage.setItem('nexushub_user', JSON.stringify(this.user));
-      toast(`Signed in locally as ${this.user.name}`);
-      render();
+    if (!isFirebaseReady || !authInstance) {
+      toast("Authentication requires an active Firebase connection. Please check your network.", true);
+      return;
+    }
+    const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    try {
+      await authInstance.signInWithPopup(provider);
+      toast("Signed in successfully!");
       goto('profile');
+    } catch (error) {
+      console.error("Google sign-in error:", error);
+      if (error.code !== 'auth/popup-closed-by-user' && error.code !== 'auth/cancelled-popup-request') {
+        toast(error.message || "Sign-in failed.", true);
+      }
     }
   },
   async logout() {
-    if (isFirebaseReady) await authInstance.signOut();
+    if (isFirebaseReady && authInstance) {
+      try {
+        await authInstance.signOut();
+      } catch (e) {
+        console.warn("Sign-out error:", e);
+      }
+    }
     this.user = null;
-    localStorage.removeItem('nexushub_user');
     sessionStorage.removeItem('nexushub-unlocked');
     toast('Signed out successfully.');
     goto('');
@@ -159,66 +237,130 @@ const slug = s => String(s || 'project').toLowerCase().trim().normalize('NFKD').
 
 function getAvatarHTML(pic, size = 34, fontSize = 20) {
   if (!pic) return `<div class="comment-avatar" style="width:${size}px;height:${size}px;display:grid;place-items:center;font-weight:700;font-size:${fontSize}px;border-radius:50%;">U</div>`;
-  if (!pic.startsWith('http')) {
-    return `<div class="comment-avatar" style="width:${size}px;height:${size}px;display:grid;place-items:center;font-size:${fontSize}px;background:var(--line);border-radius:50%;">${pic}</div>`;
+  const safePic = String(pic).trim();
+  if (safePic.startsWith('http://') || safePic.startsWith('https://')) {
+    return `<img src="${esc(safePic)}" class="comment-avatar" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" alt="Avatar" loading="lazy">`;
   }
-  return `<img src="${pic}" class="comment-avatar" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" alt="Avatar">`;
+  return `<div class="comment-avatar" style="width:${size}px;height:${size}px;display:grid;place-items:center;font-size:${fontSize}px;background:var(--line);border-radius:50%;">${esc(safePic.slice(0, 4))}</div>`;
 }
 
 function openDB() {
-  return new Promise((resolve, reject) => {
-    let r = indexedDB.open(DB_NAME, 1);
-    r.onupgradeneeded = () => r.result.createObjectStore(STORE, { keyPath: 'key' });
-    r.onsuccess = () => resolve(r.result);
-    r.onerror = () => reject(r.error);
-  });
-}
-function getRec(key) {
-  return new Promise((resolve, reject) => {
-    let r = localDb.transaction(STORE).objectStore(STORE).get(key);
-    r.onsuccess = () => resolve(r.result?.value);
-    r.onerror = () => reject(r.error);
-  });
-}
-function setRec(key, value) {
-  return new Promise((resolve, reject) => {
-    let tx = localDb.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put({ key, value });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+  return new Promise((resolve) => {
+    if (typeof indexedDB === 'undefined') {
+      console.warn("IndexedDB not supported in this browser.");
+      return resolve(null);
+    }
+    try {
+      const r = indexedDB.open(DB_NAME, 1);
+      r.onupgradeneeded = () => {
+        try { r.result.createObjectStore(STORE, { keyPath: 'key' }); } catch(e) {}
+      };
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = (e) => {
+        console.warn("IndexedDB open error:", e);
+        resolve(null);
+      };
+    } catch (e) {
+      console.warn("IndexedDB initialization error:", e);
+      resolve(null);
+    }
   });
 }
 
-async function persistLocal() {
-  await setRec('projects', data.projects);
-  await setRec('feedback', data.feedback || []);
-  await setRec('categories', data.categories);
-  await setRec('settings', data.settings);
+function getRec(key) {
+  return new Promise((resolve) => {
+    if (!localDb) return resolve(null);
+    try {
+      const tx = localDb.transaction(STORE, 'readonly');
+      const r = tx.objectStore(STORE).get(key);
+      r.onsuccess = () => resolve(r.result?.value);
+      r.onerror = () => resolve(null);
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+function setRec(key, value) {
+  return new Promise((resolve) => {
+    if (!localDb) return resolve();
+    try {
+      const tx = localDb.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put({ key, value });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch (e) {
+      resolve();
+    }
+  });
+}
+
+async function persistLocalCache() {
+  if (!localDb) return;
+  try {
+    await setRec('projects', data.projects);
+    await setRec('feedback', data.feedback || []);
+    await setRec('categories', data.categories);
+    await setRec('settings', data.settings);
+  } catch (e) {
+    console.warn("Failed to persist local cache:", e);
+  }
 }
 
 async function loadData() {
+  localDb = await openDB();
+
   if (isFirebaseReady) {
     try {
-      const pSnap = await dbInstance.collection('projects').orderBy('createdAt', 'desc').get();
-      data.projects = pSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      let pSnap;
+      // Requirement A.2: Public project queries explicitly filter visibility == 'published'.
+      // Verified owners retrieve drafts separately via loadOwnerProjects() or when authenticated.
+      if (authState.user && authState.user.isOwner) {
+        pSnap = await dbInstance.collection('projects').orderBy('createdAt', 'desc').get();
+      } else {
+        pSnap = await dbInstance.collection('projects').where('visibility', '==', 'published').get();
+      }
 
-      const fSnap = await dbInstance.collection('feedback').orderBy('createdAt', 'desc').get();
+      data.projects = pSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      data.projects.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+      // Bounded loading for feedback collection to prevent unbounded memory usage (Requirement D)
+      const fSnap = await dbInstance.collection('feedback').orderBy('createdAt', 'desc').limit(200).get();
       data.feedback = fSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+      isOfflineMode = false;
+      await persistLocalCache();
       return;
     } catch(e) {
       console.warn("Could not fetch remote documents. Falling back to local cache.", e);
+      isOfflineMode = true;
     }
+  } else {
+    isOfflineMode = true;
   }
 
-  localDb = await openDB();
   let p = await getRec('projects');
   let f = await getRec('feedback');
   let c = await getRec('categories');
   let s = await getRec('settings');
-  if (p) data.projects = p;
-  if (f) data.feedback = f;
-  if (c) data.categories = c;
+  if (p && p.length) data.projects = p;
+  if (f && f.length) data.feedback = f;
+  if (c && c.length) data.categories = c;
   if (s) data.settings = { ...data.settings, ...s };
+}
+
+// Separate retrieval of all projects (including drafts) for authenticated verified owners (Requirement A.2)
+async function loadOwnerProjects() {
+  if (!isFirebaseReady || !dbInstance || !authState.user?.isOwner) return;
+  try {
+    const snap = await dbInstance.collection('projects').orderBy('createdAt', 'desc').get();
+    data.projects = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    data.projects.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    await persistLocalCache();
+    render();
+  } catch (err) {
+    console.warn("Could not load owner projects:", err);
+  }
 }
 
 function toast(msg, err = false) {
@@ -235,23 +377,33 @@ function currentRoute() { return location.hash.replace(/^#\/?/, '') || 'home'; }
 function goto(route) { location.hash = '/' + route; }
 function isAdminRoute(r) { return r === 'admin' || r.startsWith('admin/'); }
 
+function toggleMobileNav() {
+  const panel = $('#mobile-nav');
+  if (panel) panel.classList.toggle('open');
+}
+function closeMobileNav() {
+  const panel = $('#mobile-nav');
+  if (panel) panel.classList.remove('open');
+}
+
 function nav() {
   let userSection = '';
   let mobileProfilePill = '';
+  const offlineBadge = isOfflineMode ? `<span class="badge-offline" title="Operating with local cached data">Offline</span>` : '';
   
   if (authState.user) {
     mobileProfilePill = `
-      <a class="mobile-top-profile" href="#/profile">
+      <a class="mobile-top-profile" href="#/profile" aria-label="View user profile">
         ${getAvatarHTML(authState.user.picture, 28, 16)}
       </a>
     `;
     userSection = `
-      <a class="nav-user-pill" href="#/profile" style="background:#f9f8f3;">
-        ${getAvatarHTML(authState.user.picture, 26, 15)}
+      <a class="nav-user-pill" href="#/profile">
+        ${getAvatarHTML(authState.user.picture, 24, 14)}
         <span>${esc(authState.user.name.split(' ')[0])}</span>
-        ${authState.user.isOwner ? `<span class="badge-role owner" style="padding:1px 6px;font-size:9px;">Owner</span>` : ''}
+        ${authState.user.isOwner ? `<span class="badge-role owner">Owner</span>` : ''}
       </a>
-      ${authState.user.isOwner ? `<a class="btn small primary" href="#/admin/projects/new">＋ Add project</a><a class="btn small" href="#/admin">Dashboard ↗</a>` : ''}
+      ${authState.user.isOwner ? `<a class="btn small primary" href="#/admin/projects/new">＋ New</a><a class="btn small" href="#/admin">Dashboard ↗</a>` : ''}
     `;
   } else {
     mobileProfilePill = `
@@ -263,26 +415,56 @@ function nav() {
   return `
     <header class="topbar">
       <div class="wrap nav">
-        <div style="display:flex; align-items:center; gap:10px;">
+        <div style="display:flex; align-items:center; gap:12px;">
           ${mobileProfilePill}
           <a class="brand" href="#top">
             <span class="brandmark">N</span>
-            <span>${esc(data.settings.siteName)}</span>
+            <span class="brand-name">
+              <span>${esc(data.settings.siteName)}</span>
+              <span class="brand-dot"></span>
+            </span>
           </a>
+          ${offlineBadge}
         </div>
-        <nav class="navlinks">
+        <nav class="navlinks" aria-label="Main navigation">
           <a href="#top">Home</a>
           <a href="#projects">Explore</a>
           <a href="#categories">Categories</a>
           <a href="#about">About</a>
-          ${userSection}
+          <div class="nav-actions">
+            ${userSection}
+          </div>
         </nav>
+        <button class="mobile-menu-toggle" type="button" aria-label="Toggle navigation" onclick="toggleMobileNav()">
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+      </div>
+      <div class="mobile-nav-panel" id="mobile-nav" aria-label="Mobile navigation">
+        <a href="#top" onclick="closeMobileNav()">Home</a>
+        <a href="#projects" onclick="closeMobileNav()">Explore Projects</a>
+        <a href="#categories" onclick="closeMobileNav()">Categories</a>
+        <a href="#about" onclick="closeMobileNav()">About</a>
+        <div style="padding-top: 8px;">
+          ${authState.user ? `
+            <a href="#/profile" onclick="closeMobileNav()" style="display:flex;align-items:center;gap:10px;border-bottom:none;">
+              ${getAvatarHTML(authState.user.picture, 28, 16)}
+              <span>${esc(authState.user.name)}</span>
+              ${authState.user.isOwner ? `<span class="badge-role owner">Owner</span>` : ''}
+            </a>
+            ${authState.user.isOwner ? `<div style="display:flex;gap:8px;margin-top:12px;"><a class="btn small primary" href="#/admin/projects/new" onclick="closeMobileNav()">＋ Add project</a><a class="btn small" href="#/admin" onclick="closeMobileNav()">Dashboard ↗</a></div>` : ''}
+          ` : `
+            <button class="btn primary small" style="width:100%;" onclick="closeMobileNav();authState.loginWithGoogle();">Sign in with Google</button>
+          `}
+        </div>
       </div>
     </header>
   `;
 }
 
 function footer() {
+  const safeInstagram = sanitizeUrl(data.settings.instagram) || 'https://www.instagram.com/bob.builder19/';
   return `
     <footer class="footer">
       <div class="wrap footer-shell">
@@ -294,23 +476,26 @@ function footer() {
             </a>
             <p class="footer-mission">Transforming concepts into dependable software, tools, and digital showcases.</p>
             <div class="footer-socials">
-              <a class="social-icon" href="${esc(data.settings.instagram)}" target="_blank" rel="noopener noreferrer">◎</a>
-              <a class="social-icon" href="mailto:${esc(data.settings.email)}">✉</a>
+              <a class="social-icon" href="${esc(safeInstagram)}" target="_blank" rel="noopener noreferrer" aria-label="Instagram">◎</a>
+              <a class="social-icon" href="mailto:${esc(data.settings.email)}" aria-label="Email">✉</a>
             </div>
           </div>
           <div class="footer-linkscol">
-            <h3>Explore</h3>
-            <a href="#projects">All projects</a>
+            <h3>Product</h3>
+            <a href="#projects">All Projects</a>
             <a href="#categories">Categories</a>
+            <a href="#projects" onclick="fillExplore();">Featured Builds</a>
           </div>
           <div class="footer-linkscol">
-            <h3>Account</h3>
+            <h3>Resources</h3>
+            <a href="#about">About Ayush</a>
             <a href="#/profile">My Profile</a>
-            <a href="mailto:${esc(data.settings.email)}">Send feedback</a>
+            <a href="mailto:${esc(data.settings.email)}">Send Feedback</a>
           </div>
           <div class="footer-linkscol">
-            <h3>Contact</h3>
-            <a href="${esc(data.settings.instagram)}" target="_blank" rel="noopener noreferrer">Instagram ↗</a>
+            <h3>Company</h3>
+            <a href="#about">Ayush Pathak</a>
+            <a href="${esc(safeInstagram)}" target="_blank" rel="noopener noreferrer">Instagram ↗</a>
             <a href="mailto:${esc(data.settings.email)}">${esc(data.settings.email)}</a>
           </div>
         </div>
@@ -400,27 +585,41 @@ function getRatingUI(p) {
 }
 
 function card(p) {
+  const safeLive = sanitizeUrl(p.liveUrl);
+  let statusText = 'Demo';
+  let statusClass = 'status-demo';
+  if (safeLive) {
+    statusText = 'Live';
+    statusClass = 'status-live';
+  } else if (p.visibility === 'draft') {
+    statusText = 'In Progress';
+    statusClass = 'status-beta';
+  }
+
   return `
     <article class="project-card">
-      <a href="#projects" onclick="openProjectDetail('${esc(p.slug)}');return false">
-        <div class="cover">
-          ${p.cover ? imageMarkup(p.cover, p.name) : `<div class="coverplaceholder">${esc(p.name.slice(0, 2).toUpperCase())}</div>`}
-          ${p.featured ? '<span class="featured">✦ Featured</span>' : ''}
+      <div class="card-media" onclick="openProjectDetail('${esc(p.slug)}')">
+        ${p.cover ? `<img src="${esc(resolveImageUrl(p.cover))}" alt="${esc(p.name)}" loading="lazy" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;">` : `<div class="card-placeholder">${esc(p.name.slice(0, 2).toUpperCase())}</div>`}
+        <div class="card-badges">
+          <span class="card-category">${esc(p.category || 'General')}</span>
+          ${p.featured ? `<span class="badge-featured">✦ Featured</span>` : ''}
         </div>
-      </a>
+      </div>
       <div class="cardbody">
-        <div class="cardtop">
-          <span class="pill">${esc(p.category || 'General')}</span>
+        <div class="card-header">
+          <h3 class="card-title">
+            <a href="#projects" onclick="openProjectDetail('${esc(p.slug)}');return false">${esc(p.name)}</a>
+          </h3>
+          <span class="badge-status ${statusClass}">${statusText}</span>
         </div>
-        <h3><a href="#projects" onclick="openProjectDetail('${esc(p.slug)}');return false">${esc(p.name)}</a></h3>
         ${getRatingUI(p)}
-        <p>${esc(p.description)}</p>
+        <p class="card-desc">${esc(p.description)}</p>
         <div class="tags">
-          ${(p.tags || []).slice(0, 4).map(t => `<span class="tag">${esc(t)}</span>`).join('')}
+          ${(p.tags || []).slice(0, 3).map(t => `<span class="tag">${esc(t)}</span>`).join('')}
         </div>
         <div class="cardactions">
-          <button class="btn small" onclick="openProjectDetail('${esc(p.slug)}')">Details</button>
-          ${p.liveUrl ? `<a class="btn primary small" href="${esc(p.liveUrl)}" target="_blank" rel="noopener noreferrer">Launch ↗</a>` : `<button class="btn small" onclick="openProjectDetail('${esc(p.slug)}')">Preview</button>`}
+          <button class="btn small" type="button" onclick="openProjectDetail('${esc(p.slug)}')">View Project</button>
+          ${safeLive ? `<a class="btn primary small" href="${esc(safeLive)}" target="_blank" rel="noopener noreferrer">Launch ↗</a>` : ''}
         </div>
       </div>
     </article>
@@ -433,47 +632,103 @@ function visibleProjects() {
 
 function home() {
   let ps = visibleProjects();
+  let featured = ps.find(p => p.featured) || ps[0];
+  const siteHost = (typeof window !== 'undefined' && window.location && window.location.host) ? window.location.host : 'nexushub';
+  
+  let heroVisual = '';
+  if (featured) {
+    heroVisual = `
+      <div class="hero-spotlight">
+        <div class="spotlight-card">
+          <div class="spotlight-topbar">
+            <div class="window-dots">
+              <span class="w-dot red"></span>
+              <span class="w-dot yellow"></span>
+              <span class="w-dot green"></span>
+            </div>
+            <div class="spotlight-address" title="${siteHost}/${esc(featured.slug)}">${siteHost}/${esc(featured.slug)}</div>
+            <span class="spotlight-chip">${esc(featured.category || 'Featured')}</span>
+          </div>
+          <div class="spotlight-preview" onclick="openProjectDetail('${esc(featured.slug)}')">
+            ${featured.cover ? `<img src="${esc(resolveImageUrl(featured.cover))}" alt="${esc(featured.name)}" loading="eager" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;">` : `<div class="spotlight-placeholder"><span>${esc(featured.name.slice(0, 2).toUpperCase())}</span><div class="spotlight-subtext">Featured Showcase</div></div>`}
+          </div>
+          <div class="spotlight-footer">
+            <div style="overflow:hidden;margin-right:12px;">
+              <div class="spotlight-title">${esc(featured.name)}</div>
+              <div class="spotlight-desc">${esc(featured.description.slice(0, 75))}…</div>
+            </div>
+            <button class="btn small primary" type="button" onclick="openProjectDetail('${esc(featured.slug)}')">View Details →</button>
+          </div>
+        </div>
+      </div>
+    `;
+  } else {
+    heroVisual = `
+      <div class="hero-spotlight">
+        <div class="spotlight-card">
+          <div class="spotlight-topbar">
+            <div class="window-dots">
+              <span class="w-dot red"></span>
+              <span class="w-dot yellow"></span>
+              <span class="w-dot green"></span>
+            </div>
+            <div class="spotlight-address" title="${siteHost}/studio">${siteHost}/studio</div>
+            <span class="spotlight-chip">Studio</span>
+          </div>
+          <div class="spotlight-preview">
+            <div class="spotlight-placeholder"><span>NH</span><div class="spotlight-subtext">Digital Workshop</div></div>
+          </div>
+          <div class="spotlight-footer">
+            <div>
+              <div class="spotlight-title">NexusHub Studio</div>
+              <div class="spotlight-desc">Initial production builds compiling…</div>
+            </div>
+            <a class="btn small primary" href="#about">About Studio →</a>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const safeInstagram = sanitizeUrl(data.settings.instagram) || 'https://www.instagram.com/bob.builder19/';
+
   return `
     ${nav()}
     <main id="top">
       <section class="wrap hero">
-        <div>
+        <div class="hero-content">
           <span class="eyebrow"><i class="dot"></i> Engineering & Projects</span>
-          <h1>${esc(data.settings.heroHeading).replace(/things\./i, '<span class="gradient">things.</span>')}</h1>
-          <p>${esc(data.settings.heroDescription)}</p>
+          <h1>Ideas become <span class="hero-accent">things.</span></h1>
+          <p class="hero-intro">${esc(data.settings.heroDescription)}</p>
           <div class="heroactions">
-            <a class="btn primary" href="#projects">Explore work ↓</a>
-            <a class="btn" href="#about">About the creator</a>
+            <a class="btn primary" href="#projects">Explore Projects ↓</a>
+            <a class="btn" href="#about">About the Creator →</a>
+          </div>
+          <div class="hero-stats-pill">
+            <span class="stat-icon">✦</span>
+            <span>${ps.length} curated builds</span>
+            <span class="stat-sep">·</span>
+            <span>Production & Open Source</span>
           </div>
         </div>
-        <div class="hero-visual" aria-hidden="true">
-          <div class="orb"></div>
-          <div class="floatcard fc1">
-            <strong>✦ Production Builds</strong>
-            <span>Clean & performant interfaces</span>
-          </div>
-          <div class="floatcard fc2">
-            <strong>⌘ Apps & Tools</strong>
-            <span>Continuous development</span>
-          </div>
-        </div>
+        ${heroVisual}
       </section>
       
       <section class="section page-anchor" id="projects">
         <div class="wrap">
           <div class="sectionhead">
             <div>
-              <span class="kicker">Portfolio</span>
-              <h2>Projects</h2>
-              <p>Applications, utilities, and experiments.</p>
+              <span class="kicker">Portfolio Showcase</span>
+              <h2>All Projects</h2>
+              <p>Applications, developer tools, and digital experiments built for speed and clarity.</p>
             </div>
             <div style="display:flex;gap:10px;align-items:center;">
-              <span class="pill">${ps.length} builds</span>
+              <span class="card-category">${ps.length} builds live</span>
               ${authState.user?.isOwner ? `<a class="btn small primary" href="#/admin/projects/new">＋ Add project</a>` : ''}
             </div>
           </div>
           <div class="toolbar">
-            <input class="field search" id="search" placeholder="Search projects…" aria-label="Search projects">
+            <input class="field search" id="search" placeholder="Search projects by name, description, tags…" aria-label="Search projects">
             <select class="field" id="filtercat" aria-label="Filter category">
               <option value="">All categories</option>
               ${data.categories.map(c => `<option>${esc(c)}</option>`).join('')}
@@ -481,6 +736,7 @@ function home() {
             <select class="field" id="sort" aria-label="Sort projects">
               <option value="newest">Newest first</option>
               <option value="featured">Featured first</option>
+              <option value="rating">Highest rated</option>
               <option value="oldest">Oldest first</option>
             </select>
           </div>
@@ -490,18 +746,18 @@ function home() {
         </div>
       </section>
       
-      <section class="section page-anchor section-divider" id="categories">
+      <section class="section page-anchor" id="categories">
         <div class="wrap">
           <div class="sectionhead">
             <div>
               <span class="kicker">Directory</span>
-              <h2>Categories</h2>
-              <p>Filter builds by specialization.</p>
+              <h2>Explore by Category</h2>
+              <p>Filter builds by domain and specialization.</p>
             </div>
           </div>
           <div class="categoryrow">
-            ${data.categories.map(c => `<button class="categorychip" onclick="filterCategory('${esc(c)}')">${esc(c)} <span style="color:var(--muted)">· ${visibleProjects().filter(p => p.category === c).length}</span></button>`).join('')}
-            <button class="categorychip" onclick="filterCategory('')">Show all</button>
+            ${data.categories.map(c => `<button class="categorychip ${data.selectedCategory === c ? 'active' : ''}" data-category="${esc(c)}" type="button" onclick="filterCategory('${esc(c)}')">${esc(c)} <span style="color:var(--muted);font-weight:500;">· ${visibleProjects().filter(p => p.category === c).length}</span></button>`).join('')}
+            <button class="categorychip ${!data.selectedCategory ? 'active' : ''}" data-category="" type="button" onclick="filterCategory('')">Show all</button>
           </div>
         </div>
       </section>
@@ -510,15 +766,51 @@ function home() {
         <div class="wrap">
           <div class="sectionhead">
             <div>
-              <span class="kicker">About</span>
-              <h2>Developer Profile</h2>
+              <span class="kicker">About the Creator</span>
+              <h2>Hey, I'm Ayush.</h2>
+              <p>Developer, builder, and software craftsman.</p>
             </div>
           </div>
-          <div class="aboutbox">
-            <div>
-              <span class="kicker">Creator</span>
-              <h2>Curiosity first. Build, learn, repeat.</h2>
+          <div class="about-grid">
+            <div class="about-card about-story">
+              <span class="kicker">Philosophy</span>
+              <h3>Curiosity first. Build, learn, repeat.</h3>
               <p>${esc(data.settings.aboutText)}</p>
+              <p>I focus on turning ideas into real, functional software. NexusHub serves as my public engineering workshop — a dedicated place to document, iterate, and release digital tools, web experiments, and full-stack software.</p>
+              <div class="about-actions">
+                <a class="btn primary small" href="mailto:${esc(data.settings.email)}">Get in touch ✉</a>
+                <a class="btn small" href="${esc(safeInstagram)}" target="_blank" rel="noopener noreferrer">Instagram Profile ↗</a>
+              </div>
+            </div>
+            <div class="about-card about-toolkit">
+              <h4>Development & Toolkit</h4>
+              <div class="toolkit-group">
+                <span class="toolkit-label">Core Technologies</span>
+                <div class="toolkit-tags">
+                  <span class="toolkit-tag">JavaScript (ES6+)</span>
+                  <span class="toolkit-tag">TypeScript</span>
+                  <span class="toolkit-tag">HTML5 / Modern CSS</span>
+                  <span class="toolkit-tag">Node.js</span>
+                </div>
+              </div>
+              <div class="toolkit-group">
+                <span class="toolkit-label">Cloud & Infrastructure</span>
+                <div class="toolkit-tags">
+                  <span class="toolkit-tag">Firebase Auth</span>
+                  <span class="toolkit-tag">Cloud Firestore</span>
+                  <span class="toolkit-tag">Firebase Storage</span>
+                  <span class="toolkit-tag">Vercel Deployments</span>
+                </div>
+              </div>
+              <div class="toolkit-group">
+                <span class="toolkit-label">Focus Areas</span>
+                <div class="toolkit-tags">
+                  <span class="toolkit-tag">UI/UX Craft</span>
+                  <span class="toolkit-tag">Fast Performance</span>
+                  <span class="toolkit-tag">Accessible Web (a11y)</span>
+                  <span class="toolkit-tag">Responsive Layouts</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -529,10 +821,30 @@ function home() {
 }
 
 function filterCategory(cat) {
+  data.selectedCategory = cat || '';
   const select = $('#filtercat');
-  if (select) select.value = cat;
+  if (select) select.value = cat || '';
+  updateCategoryChips(cat || '');
   fillExplore();
   document.querySelector('#projects')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function updateCategoryChips(cat) {
+  data.selectedCategory = cat || '';
+  document.querySelectorAll('.categorychip').forEach(chip => {
+    const chipCat = chip.getAttribute('data-category') || '';
+    if (chipCat === (cat || '')) {
+      chip.classList.add('active');
+    } else {
+      chip.classList.remove('active');
+    }
+  });
+}
+
+function getRatingAvg(p) {
+  let fs = projectFeedback(p);
+  if (!fs.length) return 0;
+  return fs.reduce((sum, f) => sum + Number(f.rating || 0), 0) / fs.length;
 }
 
 function fillExplore() {
@@ -542,9 +854,23 @@ function fillExplore() {
   
   let ps = visibleProjects().filter(p => (!cat || p.category === cat) && [p.name, p.description, ...(p.tags || [])].join(' ').toLowerCase().includes(q));
   
-  ps.sort((a, b) => sort === 'oldest' ? new Date(a.createdAt) - new Date(b.createdAt) : sort === 'featured' ? (Number(b.featured) - Number(a.featured)) || new Date(b.createdAt) - new Date(a.createdAt) : new Date(b.createdAt) - new Date(a.createdAt));
+  ps.sort((a, b) => {
+    if (sort === 'oldest') {
+      return new Date(a.createdAt) - new Date(b.createdAt);
+    }
+    if (sort === 'featured') {
+      return (Number(b.featured) - Number(a.featured)) || (new Date(b.createdAt) - new Date(a.createdAt));
+    }
+    if (sort === 'rating') {
+      const avgA = getRatingAvg(a);
+      const avgB = getRatingAvg(b);
+      if (avgB !== avgA) return avgB - avgA;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    }
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
   
-  $('#exploregrid').innerHTML = ps.length ? ps.map(card).join('') : '<div class="empty"><strong>No matches found.</strong></div>';
+  $('#exploregrid').innerHTML = ps.length ? ps.map(card).join('') : '<div class="empty"><strong>No matches found.</strong><p style="margin:4px 0 0;">Try adjusting your search terms or category filter.</p></div>';
 }
 
 /* --- DEDICATED PROFILE & EMOJI EDITOR PAGE --- */
@@ -639,141 +965,172 @@ function selectEmoji(e) {
 }
 
 async function saveProfileData() {
-  let newName = $('#edit-username-input').value.trim();
+  let newName = ($('#edit-username-input')?.value || '').trim();
   let newEmoji = data.selectedEmoji || authState.user.picture;
   let lowerName = newName.toLowerCase();
 
-  if (newName.length < 3) return toast('Username must be at least 3 characters.', true);
+  if (newName.length < 3 || newName.length > 25) return toast('Username must be between 3 and 25 characters.', true);
 
   const reserved = ['ayush', 'ayush pathak', 'owner', 'admin', 'administrator', 'nexushub'];
   if (reserved.includes(lowerName) && !authState.user.isOwner) {
     return toast('That username is reserved and cannot be used.', true);
   }
 
-  if (isFirebaseReady) {
+  if (isOfflineMode || !isFirebaseReady) {
+    return toast('Cannot update profile while offline. Please connect to the internet.', true);
+  }
+
+  try {
     let snap = await dbInstance.collection('users').where('username_lower', '==', lowerName).get();
     let isTaken = false;
     snap.forEach(doc => { if (doc.id !== authState.user.uid) isTaken = true; });
 
     if (isTaken) return toast('Username is already taken by another user!', true);
 
-    await dbInstance.collection('users').doc(authState.user.uid).update({
+    const userDocRef = dbInstance.collection('users').doc(authState.user.uid);
+    const existingSnap = await userDocRef.get();
+    const existing = existingSnap.data() || {};
+
+    const profileData = {
       username: newName,
       username_lower: lowerName,
-      emoji: newEmoji
-    });
-  }
-  
-  authState.user.name = newName;
-  authState.user.picture = newEmoji;
-  localStorage.setItem('nexushub_user', JSON.stringify(authState.user));
-  
-  if (data.feedback) {
-     data.feedback.forEach(f => {
-        if (f.userId === authState.user.uid) {
-           f.userName = newName;
-           f.userPhoto = newEmoji;
-        }
-     });
-  }
+      emoji: newEmoji,
+      email: (authState.user.email || existing.email || '').toLowerCase().trim(),
+      createdAt: existing.createdAt || new Date().toISOString()
+    };
 
-  toast('Profile updated successfully!');
-  render();
+    await userDocRef.set(profileData, { merge: true });
+
+    authState.user.name = newName;
+    authState.user.picture = newEmoji;
+
+    if (data.feedback) {
+      data.feedback.forEach(f => {
+        if (f.userId === authState.user.uid) {
+          f.userName = newName;
+          f.userPhoto = newEmoji;
+        }
+      });
+    }
+
+    await persistLocalCache();
+    toast('Profile updated successfully!');
+    render();
+  } catch (err) {
+    console.error('Profile update error:', err);
+    toast('Failed to update profile: ' + err.message, true);
+  }
 }
 
 async function deleteUserReview(reviewId) {
   let btn = $('#del-rev-' + reviewId);
   if (btn) { btn.disabled = true; btn.textContent = 'Deleting...'; }
 
-  if (isFirebaseReady) {
-    try {
-      await dbInstance.collection('feedback').doc(reviewId).delete();
-    } catch(e) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Delete Review'; }
-      return toast('Could not delete review.', true);
+  if (isOfflineMode || !isFirebaseReady) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Delete Review'; }
+    return toast('Cannot delete review while offline.', true);
+  }
+
+  try {
+    await dbInstance.collection('feedback').doc(reviewId).delete();
+    data.feedback = (data.feedback || []).filter(f => f.id !== reviewId);
+    await persistLocalCache();
+
+    let item = $('#review-item-' + reviewId);
+    if (item) {
+      item.style.transition = 'opacity 0.3s ease';
+      item.style.opacity = '0';
+      setTimeout(() => { item.remove(); render(); }, 300);
+    } else {
+      render();
     }
+    toast('Review deleted successfully.');
+  } catch(e) {
+    console.error('Delete review error:', e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Delete Review'; }
+    toast('Could not delete review: ' + e.message, true);
   }
-  
-  data.feedback = (data.feedback || []).filter(f => f.id !== reviewId);
-  await persistLocal();
-  
-  let item = $('#review-item-' + reviewId);
-  if (item) {
-    item.style.transition = 'opacity 0.3s ease';
-    item.style.opacity = '0';
-    setTimeout(() => item.remove(), 300);
-  } else {
-    render();
-  }
-  toast('Review deleted successfully.');
 }
 
-/* --- PLAY STORE STYLE PROJECT MODAL --- */
+/* --- PROJECT DETAILS SHOWCASE MODAL --- */
+let lastFocusedElement = null;
+
 function openProjectDetail(projectSlug) {
   let p = visibleProjects().find(x => x.slug === projectSlug);
   if (!p) return toast('Project not found.', true);
   
-  let related = visibleProjects().filter(x => x.category === p.category && x.id !== p.id).slice(0, 3);
+  lastFocusedElement = document.activeElement;
   let fs = projectFeedback(p);
   let avg = fs.length ? (fs.reduce((n, f) => n + Number(f.rating || 0), 0) / fs.length).toFixed(1) : '0.0';
-  
-  let iconHtml = p.cover ? `<img src="${p.cover}" alt="Icon" style="width:100%;height:100%;object-fit:cover;">` : `<div style="width:100%;height:100%;display:grid;place-items:center;background:var(--bg);font-size:36px;font-weight:bold;color:var(--muted);">${p.name.slice(0, 1).toUpperCase()}</div>`;
+  let safeLive = sanitizeUrl(p.liveUrl);
+  let statusText = safeLive ? 'Live Release' : (p.visibility === 'draft' ? 'In Development' : 'Demo Build');
+  let statusClass = safeLive ? 'status-live' : (p.visibility === 'draft' ? 'status-beta' : 'status-demo');
+
+  const coverUrl = resolveImageUrl(p.cover);
+  let iconHtml = coverUrl ? `<img src="${esc(coverUrl)}" alt="${esc(p.name)}" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;">` : `<div style="font-size:32px;font-weight:800;color:var(--muted);">${esc(p.name.slice(0, 1).toUpperCase())}</div>`;
   
   let galleryHtml = '';
-  let allImages = p.screenshots?.length ? p.screenshots : (p.cover ? [{src: p.cover, alt: 'Cover'}] : []);
+  let allImages = p.screenshots?.length ? p.screenshots : (coverUrl ? [{src: coverUrl, alt: 'Cover'}] : []);
   if(allImages.length) {
     galleryHtml = `
-      <div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:10px;margin:20px 0;scrollbar-width:thin;">
-        ${allImages.map((im, i) => `<img src="${typeof im === 'string' ? im : im.src}" alt="Screenshot" style="height:220px;border-radius:12px;object-fit:cover;border:1px solid var(--line);cursor:pointer;" onclick="openLightbox('${p.id}',${i})">`).join('')}
+      <div class="modal-gallery">
+        ${allImages.map((im, i) => {
+          const raw = typeof im === 'string' ? im : im.src;
+          const resolved = resolveImageUrl(raw);
+          return `<img src="${esc(resolved)}" alt="Screenshot" loading="lazy" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;" onclick="openLightbox('${p.id}',${i})">`;
+        }).join('')}
       </div>
     `;
   }
 
   $('#projectmodalcontent').innerHTML = `
-    <div style="max-width:800px; margin:auto;">
-      <div style="display:flex; gap:20px; align-items:flex-start; margin-bottom: 24px;">
-        <div style="width:100px; height:100px; border-radius:20px; overflow:hidden; border:1px solid var(--line); flex-shrink:0;">
+    <div>
+      <div class="modal-header-hero">
+        <div class="modal-project-icon">
           ${iconHtml}
         </div>
-        <div>
-          <h1 style="margin:0 0 6px; font-size:clamp(24px, 5vw, 32px); line-height:1.1; letter-spacing:-1px;">${esc(p.name)}</h1>
-          <p style="margin:0; color:#059669; font-weight:600; font-size:15px;">NexusHub Production</p>
-          <p style="margin:4px 0 0; color:var(--muted); font-size:13px;">Verified release</p>
+        <div style="flex:1;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+            <span class="card-category">${esc(p.category || 'General')}</span>
+            <span class="badge-status ${statusClass}">${statusText}</span>
+          </div>
+          <h1 id="modal-project-title" style="font-size:clamp(24px, 4.5vw, 32px); line-height:1.15; margin:0 0 4px;">${esc(p.name)}</h1>
+          <p style="color:var(--muted); font-size:13px; margin:0;">Software Release · NexusHub Production</p>
         </div>
       </div>
       
-      <div style="display:flex; gap:30px; margin-bottom: 24px; text-align:center; color:var(--muted); font-size:13px;">
-        <div>
-          <strong style="font-size:18px; color:var(--text);">${fs.length ? avg : 'N/A'} <span style="font-size:14px;color:#facc15;">★</span></strong>
-          <div>${fs.length} reviews</div>
+      <div class="modal-meta-row">
+        <div class="modal-meta-item">
+          <strong>${fs.length ? avg : '—'} <span style="font-size:14px;color:var(--gold);">★</span></strong>
+          <span>${fs.length} review${fs.length === 1 ? '' : 's'}</span>
         </div>
-        <div style="width:1px; background:var(--line);"></div>
-        <div>
-          <strong style="font-size:18px; color:var(--text);">Web</strong>
-          <div>Platform</div>
+        <div style="width:1px;height:28px;background:var(--line);"></div>
+        <div class="modal-meta-item">
+          <strong>Web</strong>
+          <span>Platform</span>
         </div>
-        <div style="width:1px; background:var(--line);"></div>
-        <div>
-          <strong style="font-size:18px; color:var(--text);"><span style="border:1px solid var(--muted);padding:1px 4px;border-radius:4px;font-size:11px;">E</span></strong>
-          <div>Public</div>
+        <div style="width:1px;height:28px;background:var(--line);"></div>
+        <div class="modal-meta-item">
+          <strong>${p.tags?.length || 0}</strong>
+          <span>Technologies</span>
         </div>
       </div>
       
-      <div style="margin-bottom:30px;">
-        ${p.liveUrl ? `<a class="btn primary" style="width:100%; padding:14px; font-size:15px; border-radius:999px; text-align:center;" href="${esc(p.liveUrl)}" target="_blank" rel="noopener noreferrer">Launch Project ↗</a>` : `<button class="btn primary" style="width:100%; padding:14px; font-size:15px; border-radius:999px;" disabled>Deployment Pending</button>`}
+      <div style="margin-bottom:28px;">
+        ${safeLive ? `<a class="btn primary" style="width:100%; padding:14px; font-size:15px; border-radius:var(--radius-sm); text-align:center;" href="${esc(safeLive)}" target="_blank" rel="noopener noreferrer">Launch Project ↗</a>` : `<button class="btn primary" style="width:100%; padding:14px; font-size:15px; border-radius:var(--radius-sm);" disabled>Deployment Pending</button>`}
       </div>
       
       ${galleryHtml}
       
-      <div style="margin-bottom: 30px;">
-        <h3 style="margin:0 0 12px;font-size:18px;">About this project</h3>
-        <p style="color:var(--text); line-height:1.6; white-space:pre-wrap; font-size:14px; margin:0;">${esc(p.description)}</p>
-        <div class="tags" style="margin-top:16px;">
-          ${(p.tags || []).map(t => `<span class="tag" style="border-radius:999px;padding:5px 12px;">${esc(t)}</span>`).join('')}
+      <div style="margin-bottom: 32px;">
+        <h3 style="margin:0 0 12px;font-size:18px;">About this software</h3>
+        <p style="color:var(--text); line-height:1.65; white-space:pre-wrap; font-size:14.5px; margin:0;">${esc(p.description)}</p>
+        <div class="tags" style="margin-top:18px;">
+          ${(p.tags || []).map(t => `<span class="tag" style="border-radius:var(--radius-xs);padding:4px 10px;">${esc(t)}</span>`).join('')}
         </div>
-        <div style="border-top:1px solid var(--line); margin-top:20px; padding-top:16px;">
-          <strong style="display:block;font-size:13px;margin-bottom:4px;">Category</strong>
-          <span style="color:var(--muted);font-size:14px;">${esc(p.category || 'General')}</span>
+        <div style="border-top:1px solid var(--line); margin-top:20px; padding-top:16px; display:flex; justify-content:space-between; font-size:13px; color:var(--muted);">
+          <span>Category: <strong style="color:var(--text);">${esc(p.category || 'General')}</strong></span>
+          <span>Verified Release: <strong style="color:var(--accent);">Active</strong></span>
         </div>
       </div>
 
@@ -783,49 +1140,47 @@ function openProjectDetail(projectSlug) {
   
   $('#projectmodal').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
+  setTimeout(() => { $('#projectmodal .modal-close')?.focus(); }, 40);
 }
 
 function closeProjectModal() {
   $('#projectmodal').classList.add('hidden');
   document.body.style.overflow = '';
+  if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+    lastFocusedElement.focus();
+    lastFocusedElement = null;
+  }
 }
 
 function feedbackSection(p) {
   let fs = projectFeedback(p);
   let avg = fs.length ? (fs.reduce((n, f) => n + Number(f.rating || 0), 0) / fs.length).toFixed(1) : '0';
   let userExistingReview = authState.user ? fs.find(f => f.userId === authState.user.uid) : null;
-  let userReviewCount = authState.user ? fs.filter(f => f.userId === authState.user.uid).length : 0;
+  let activeRating = data.feedbackDraftRating || (userExistingReview ? userExistingReview.rating : 0);
   
   let rateBoxContent = '';
   if (authState.user) {
-    if (userReviewCount >= 5) {
-      rateBoxContent = `
-        <div style="text-align: center; padding: 10px 0;">
-          <p style="margin: 0; font-size: 14px; color: #b45309; font-weight: 600;">You have reached the maximum limit of 5 reviews for this project. Please delete one of your reviews from your profile to post a new one.</p>
+    rateBoxContent = `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+        ${getAvatarHTML(authState.user.picture, 34, 20)}
+        <div>
+          <strong style="font-size:14px;display:block;">${esc(authState.user.name)}</strong>
+          <span style="font-size:12px;color:var(--muted);">${userExistingReview ? 'Editing your review & rating' : 'Write a review'}</span>
         </div>
-      `;
-    } else {
-      rateBoxContent = `
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
-          ${getAvatarHTML(authState.user.picture, 34, 20)}
-          <div>
-            <strong style="font-size:14px;display:block;">${esc(authState.user.name)}</strong>
-            <span style="font-size:12px;color:var(--muted);">${userExistingReview ? 'Updating your review & rating' : 'Posting new review'} (${userReviewCount}/5 used)</span>
+      </div>
+      <form onsubmit="event.preventDefault();submitFeedback('${p.id}')">
+        <div class="star-row" id="feedbackstars" style="display:flex;gap:12px;margin-bottom:16px;">
+          ${[1, 2, 3, 4, 5].map(n => `<button type="button" style="background:none;border:none;font-size:36px;color:${(activeRating >= n) ? '#059669' : '#cbd5e1'};cursor:pointer;padding:0;line-height:1;" aria-label="${n} stars" onclick="chooseFeedbackRating(${n})">★</button>`).join('')}
+        </div>
+        <div class="feedback-grid" style="display:grid;grid-template-columns:1fr;gap:12px;" id="feedbackformwrap">
+          <textarea id="feedbackmessage" class="field" maxlength="500" placeholder="Write your review for ${esc(p.name)}..." style="min-height:80px;">${esc(userExistingReview?.message || '')}</textarea>
+          <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;margin-top:4px;">
+            ${userExistingReview ? `<button type="button" class="btn small danger" onclick="deleteUserReviewModal('${userExistingReview.id}','${esc(p.slug)}')">Delete My Review</button>` : ''}
+            <button class="btn primary" type="submit" id="submit-review-btn" style="border-radius:999px;">${userExistingReview ? 'Update Review' : 'Post Review'}</button>
           </div>
         </div>
-        <form onsubmit="event.preventDefault();submitFeedback('${p.id}')">
-          <div class="star-row" id="feedbackstars" style="display:flex;gap:12px;margin-bottom:16px;">
-            ${[1, 2, 3, 4, 5].map(n => `<button type="button" style="background:none;border:none;font-size:36px;color:${(userExistingReview?.rating >= n) ? '#059669' : '#cbd5e1'};cursor:pointer;padding:0;line-height:1;" aria-label="${n} stars" onclick="chooseFeedbackRating(${n})">★</button>`).join('')}
-          </div>
-          <div class="feedback-grid" style="display:grid;grid-template-columns:1fr;gap:12px;" id="feedbackformwrap">
-            <textarea id="feedbackmessage" class="field" maxlength="500" placeholder="Write your review for ${esc(p.name)}..." style="min-height:80px;">${esc(userExistingReview?.message || '')}</textarea>
-            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:4px;">
-              <button class="btn primary" type="submit" id="submit-review-btn" style="border-radius:999px;">Post Review</button>
-            </div>
-          </div>
-        </form>
-      `;
-    }
+      </form>
+    `;
   } else {
     rateBoxContent = `
       <div style="text-align: center; padding: 12px 0;">
@@ -861,7 +1216,7 @@ function feedbackSection(p) {
       </div>
 
       <div style="background:var(--bg); border:1px solid var(--line); border-radius:16px; padding:20px; margin-bottom:24px;">
-        <h4 style="margin:0 0 8px;font-size:16px;">Rate this app</h4>
+        <h4 style="margin:0 0 8px;font-size:16px;">${userExistingReview ? 'Your rating & review' : 'Rate this app'}</h4>
         ${rateBoxContent}
       </div>
 
@@ -900,17 +1255,11 @@ function chooseFeedbackRating(n) {
 
 async function submitFeedback(projectId) {
   let btn = $('#submit-review-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Posting review...'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving review...'; }
 
-  let rating = Number(data.feedbackDraftRating || 0);
-  if (rating < 1 || rating > 5) {
-    let existingFs = projectFeedback({id: projectId});
-    let myPrev = existingFs.find(f => f.userId === authState.user?.uid);
-    if (myPrev) rating = myPrev.rating;
-    else {
-      if (btn) { btn.disabled = false; btn.textContent = 'Post Review'; }
-      return toast('Please select star rating first.', true);
-    }
+  if (isOfflineMode || !isFirebaseReady) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Post Review'; }
+    return toast('Cannot submit reviews in offline mode. Please check connection.', true);
   }
 
   if (!authState.user) {
@@ -924,81 +1273,63 @@ async function submitFeedback(projectId) {
     return toast('Project not found.', true);
   }
   
-  let message = ($('#feedbackmessage')?.value || '').trim();
-  if (message.length > 500) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Post Review'; }
-    return toast('Please shorten your feedback.', true);
-  }
-
   let userReviews = (data.feedback || []).filter(f => f.projectId === projectId && f.userId === authState.user.uid);
   let existingReview = userReviews[0];
 
-  if (!existingReview && userReviews.length >= 5) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Post Review'; }
-    return toast('You can only post up to 5 reviews per project. Delete a previous review to post a new one.', true);
+  let rating = Number(data.feedbackDraftRating || (existingReview ? existingReview.rating : 0));
+  if (rating < 1 || rating > 5) {
+    if (btn) { btn.disabled = false; btn.textContent = existingReview ? 'Update Review' : 'Post Review'; }
+    return toast('Please select star rating first.', true);
   }
 
-  if (isFirebaseReady) {
-    try {
-      if (existingReview) {
-        await dbInstance.collection('feedback').doc(existingReview.id).update({
-          rating,
-          message,
-          userName: authState.user.name,
-          userPhoto: authState.user.picture,
-          createdAt: new Date().toISOString()
-        });
-        existingReview.rating = rating;
-        existingReview.message = message;
-        existingReview.userName = authState.user.name;
-        existingReview.userPhoto = authState.user.picture;
-      } else {
-        const newReview = {
-          projectId,
-          userId: authState.user.uid,
-          rating,
-          message,
-          userName: authState.user.name,
-          userEmail: authState.user.email,
-          userPhoto: authState.user.picture,
-          createdAt: new Date().toISOString()
-        };
-        const docRef = await dbInstance.collection('feedback').add(newReview);
-        newReview.id = docRef.id;
-        data.feedback.unshift(newReview);
-      }
-    } catch(e) {
-      console.error(e);
-      if (btn) { btn.disabled = false; btn.textContent = 'Post Review'; }
-      return toast("Could not publish review: " + e.message, true);
-    }
-  } else {
-    if (existingReview) {
-      existingReview.rating = rating;
-      existingReview.message = message;
-    } else {
-      data.feedback.unshift({
-        id: 'f_' + Date.now(),
-        projectId,
-        userId: authState.user.uid,
-        rating,
-        message,
-        userName: authState.user.name,
-        userEmail: authState.user.email,
-        userPhoto: authState.user.picture,
-        createdAt: new Date().toISOString()
-      });
-    }
+  let message = ($('#feedbackmessage')?.value || '').trim();
+  if (message.length > 500) {
+    if (btn) { btn.disabled = false; btn.textContent = existingReview ? 'Update Review' : 'Post Review'; }
+    return toast('Please shorten your feedback (max 500 characters).', true);
   }
-  
-  await persistLocal();
-  data.feedbackDraftRating = 0;
-  toast('Review posted successfully!');
-  
-  if (!$('#projectmodal').classList.contains('hidden')) {
-    openProjectDetail(p.slug);
-  } else {
-    render();
+
+  const deterministicDocId = `${projectId}_${authState.user.uid}`;
+  const reviewData = {
+    projectId,
+    userId: authState.user.uid,
+    rating: Math.round(rating),
+    message: message,
+    userName: authState.user.name,
+    userEmail: authState.user.email || '',
+    userPhoto: authState.user.picture || '👾',
+    createdAt: existingReview ? (existingReview.createdAt || new Date().toISOString()) : new Date().toISOString()
+  };
+
+  try {
+    // Requirement A.1: Deterministic document ID ({projectId}_{userId}).
+    // Safe legacy migration: if a legacy review ID existed, migrate to the deterministic ID and remove legacy doc.
+    if (existingReview && existingReview.id !== deterministicDocId) {
+      const batch = dbInstance.batch();
+      batch.set(dbInstance.collection('feedback').doc(deterministicDocId), reviewData);
+      batch.delete(dbInstance.collection('feedback').doc(existingReview.id));
+      await batch.commit();
+    } else {
+      await dbInstance.collection('feedback').doc(deterministicDocId).set(reviewData, { merge: true });
+    }
+
+    const savedReview = { id: deterministicDocId, ...reviewData };
+    // Remove any legacy document entry and store the canonical review
+    data.feedback = (data.feedback || []).filter(f => !(f.projectId === projectId && f.userId === authState.user.uid));
+    data.feedback.unshift(savedReview);
+
+    await persistLocalCache();
+    data.feedbackDraftRating = 0;
+    toast(existingReview ? 'Review updated successfully!' : 'Review posted successfully!');
+
+    if (!$('#projectmodal').classList.contains('hidden')) {
+      openProjectDetail(p.slug);
+    } else {
+      render();
+    }
+  } catch(e) {
+    console.error('Review submission error:', e);
+    if (btn) { btn.disabled = false; btn.textContent = existingReview ? 'Update Review' : 'Post Review'; }
+    return toast("Could not publish review: " + e.message, true);
   }
 }
 
@@ -1006,23 +1337,27 @@ async function deleteUserReviewModal(reviewId, projectSlug) {
   let btn = $('#del-rev-modal-' + reviewId);
   if (btn) { btn.disabled = true; btn.textContent = 'Deleting...'; }
 
+  if (isOfflineMode || !isFirebaseReady) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+    return toast('Cannot delete review in offline mode.', true);
+  }
+
   if (!confirm('Are you sure you want to delete this review?')) {
     if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
     return;
   }
-  if (isFirebaseReady) {
-    try {
-      await dbInstance.collection('feedback').doc(reviewId).delete();
-    } catch(e) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
-      return toast('Could not delete review.', true);
-    }
+
+  try {
+    await dbInstance.collection('feedback').doc(reviewId).delete();
+    data.feedback = (data.feedback || []).filter(f => f.id !== reviewId);
+    await persistLocalCache();
+    toast('Review deleted successfully.');
+    openProjectDetail(projectSlug);
+  } catch(e) {
+    console.error('Delete modal review error:', e);
+    if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+    return toast('Could not delete review: ' + e.message, true);
   }
-  
-  data.feedback = (data.feedback || []).filter(f => f.id !== reviewId);
-  await persistLocal();
-  toast('Review deleted successfully.');
-  openProjectDetail(projectSlug);
 }
 
 /* --- SECURE ADMIN & PROJECT CONTROLLER (OWNER ONLY) --- */
@@ -1089,7 +1424,7 @@ function projectTable(ps) {
                 </div>
               </td>
             </tr>
-          `).join('') || '<tr><td colspan="4">No projects yet.</td></tr>'}
+          `).join('') || '<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--muted);">No projects match this view.</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -1134,48 +1469,79 @@ function projectForm(id) {
     id: '', name: '', slug: '', category: data.categories[0] || 'Web Apps', description: '', liveUrl: '', githubUrl: '', tags: [], visibility: 'published', featured: false, cover: '', screenshots: [], createdAt: new Date().toISOString() 
   };
   data.editId = id || null;
-  data.formImages = p.screenshots || [];
+  data.coverDraft = p.cover || '';
+  data.formImages = Array.isArray(p.screenshots) ? [...p.screenshots] : [];
   
   return adminShell(`
     <div class="adminhead">
       <div>
         <span class="kicker">${id ? 'Edit existing build' : 'Add something new'}</span>
         <h1>${id ? 'Edit Project' : 'Create Project'}</h1>
+        <p style="color:var(--muted);margin:4px 0;">Configure showcase details, deployment links, tags, and media.</p>
       </div>
-      <a class="btn" href="#/admin/projects">← Back</a>
+      <button class="btn" type="button" onclick="cancelProjectEdit()">← Back to Projects</button>
     </div>
     <form id="projectform" onsubmit="event.preventDefault();saveProject()">
       <div class="panel">
+        <h2>Project Metadata</h2>
         <div class="formgrid">
           <div class="formfield">
-            <label>Project Title *</label>
+            <label for="pname">Project Title *</label>
             <input class="field" id="pname" maxlength="100" required value="${esc(p.name)}" oninput="suggestSlug()" placeholder="e.g. Esports Arena">
+            <span class="hint">The public display title for this project.</span>
           </div>
           <div class="formfield">
-            <label>URL Slug</label>
-            <input class="field" id="pslug" maxlength="90" value="${esc(p.slug)}" placeholder="e.g. esports-arena">
+            <label for="pslug">URL Slug *</label>
+            <input class="field" id="pslug" maxlength="90" required value="${esc(p.slug)}" placeholder="e.g. esports-arena">
+            <span class="hint">Alphanumeric URL handle (e.g. esports-arena).</span>
           </div>
           <div class="formfield">
-            <label>Category</label>
-            <select class="field" id="pcategory">${data.categories.map(c => `<option ${c === p.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+            <label for="pcategory">Category *</label>
+            <select class="field" id="pcategory">
+              ${data.categories.map(c => `<option ${c === p.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+            </select>
+            <span class="hint">Primary domain or area of software engineering.</span>
           </div>
           <div class="formfield">
-            <label>Live URL</label>
-            <input class="field" id="plive" type="text" placeholder="https://..." value="${esc(p.liveUrl)}">
+            <label for="plive">Live Web URL</label>
+            <input class="field" id="plive" type="url" placeholder="https://example.com" value="${esc(p.liveUrl)}">
+            <span class="hint">Optional link to production deployment (starts with https:// or http://).</span>
           </div>
           <div class="formfield full">
-            <label>Description *</label>
-            <textarea class="field" id="pdesc" maxlength="500" required placeholder="Project overview...">${esc(p.description)}</textarea>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <label for="pdesc">Description *</label>
+              <span class="hint" id="pdesc-counter">${(p.description || '').length} / 500</span>
+            </div>
+            <textarea class="field" id="pdesc" maxlength="500" required placeholder="Describe what the software does, architecture, and purpose..." oninput="$('#pdesc-counter').textContent = this.value.length + ' / 500'">${esc(p.description)}</textarea>
           </div>
-          <div class="formfield">
-            <label>Tags</label>
-            <input class="field" id="ptags" value="${esc(p.tags.join(', '))}" placeholder="React, Web">
+          <div class="formfield full">
+            <label for="ptags">Technologies & Tags</label>
+            <input class="field" id="ptags" value="${esc((p.tags || []).join(', '))}" placeholder="e.g. React, TypeScript, Firebase, Tailwind">
+            <span class="hint">Separate technology tags with commas.</span>
           </div>
-          <div class="formfield">
-            <label>Visibility</label>
-            <div class="checkrow">
-              <label><input type="radio" name="visibility" value="published" ${p.visibility === 'published' ? 'checked' : ''}> Published (Live)</label>
-              <label><input type="radio" name="visibility" value="draft" ${p.visibility === 'draft' ? 'checked' : ''}> Draft</label>
+          <div class="formfield full">
+            <label>Spotlight & Promotion</label>
+            <label class="checkrow" style="cursor:pointer; padding: 14px 16px; background: var(--surface-alt); border: 1px solid var(--line); border-radius: var(--radius-xs); display:flex; align-items:center;">
+              <input type="checkbox" id="pfeatured" ${p.featured ? 'checked' : ''} style="width:18px;height:18px;accent-color:var(--accent);">
+              <div>
+                <strong style="color:var(--text);font-size:14px;">Feature in Hero Spotlight</strong>
+                <p class="hint" style="margin:2px 0 0;">Highlights this project in the prominent showcase card at the top of the homepage hero.</p>
+              </div>
+            </label>
+          </div>
+          <div class="formfield full">
+            <label>Publication Status *</label>
+            <div class="checkrow" style="gap:18px; margin-top:4px;">
+              <label style="cursor:pointer; display:flex; align-items:center; gap:8px;">
+                <input type="radio" name="visibility" value="published" ${p.visibility === 'published' ? 'checked' : ''} style="accent-color:var(--accent);">
+                <span class="badge-status status-live">Published</span>
+                <span class="hint">Visible to all public visitors on NexusHub</span>
+              </label>
+              <label style="cursor:pointer; display:flex; align-items:center; gap:8px;">
+                <input type="radio" name="visibility" value="draft" ${p.visibility === 'draft' ? 'checked' : ''} style="accent-color:var(--accent);">
+                <span class="badge-status status-beta">Draft</span>
+                <span class="hint">Hidden from public showcase, accessible only in owner admin</span>
+              </label>
             </div>
           </div>
         </div>
@@ -1183,87 +1549,141 @@ function projectForm(id) {
       
       <div class="panel">
         <h2>Cover Icon / Image</h2>
-        <input class="field" type="file" id="coverfile" accept="image/png,image/jpeg,image/webp" onchange="previewCover(this)">
-        <div class="imagepreview" id="coverpreview">
-          ${p.cover ? `<div class="imageitem"><img src="${p.cover}" alt="Cover"><button type="button" onclick="removeCover()">×</button></div>` : ''}
+        <p class="hint" style="margin:0 0 12px;">Enter static image path in repository (e.g. <code>/assets/projects/my-project/cover.webp</code>) or an existing image URL.</p>
+        <div style="display:flex;gap:10px;align-items:center;">
+          <input class="field" style="flex:1;" type="text" id="coverpath" placeholder="/assets/projects/my-project/cover.webp" value="${esc(data.coverDraft)}" oninput="updateCoverPreview(this.value)">
+          <button class="btn" type="button" onclick="clearCoverPath()">Clear</button>
+        </div>
+        <span class="hint" style="display:block;margin-top:6px;">Static images are stored under <code>assets/projects/&lt;project-slug&gt;/</code> in your GitHub repository and deployed automatically via Vercel.</span>
+        <div class="imagepreview" id="coverpreview" style="margin-top:12px;">
+          ${renderCoverPreviewHtml(data.coverDraft)}
         </div>
       </div>
 
       <div class="panel">
         <h2>Project Gallery / Screenshots</h2>
-        <p class="hint">Upload screenshots to showcase your work in the project details view.</p>
-        <input class="field" type="file" id="screensfiles" accept="image/png,image/jpeg,image/webp" multiple onchange="previewScreens(this)">
-        <div id="screenspreview" class="imagepreview">
-          ${(data.formImages || []).map((im, i) => `
-            <div class="imageitem">
-              <img src="${typeof im === 'string' ? im : im.src}" alt="Screenshot">
-              <button type="button" onclick="removeExistingScreenshot(${i})">×</button>
-            </div>
-          `).join('')}
+        <p class="hint" style="margin:0 0 12px;">Add static repository image paths for the showcase gallery (e.g. <code>/assets/projects/my-project/screen-1.webp</code>) or existing URLs.</p>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;">
+          <input class="field" style="flex:1;" type="text" id="newscreenpath" placeholder="/assets/projects/my-project/screen-1.webp" onkeydown="if(event.key==='Enter'){event.preventDefault();addScreenshotPath();}">
+          <button class="btn primary" type="button" onclick="addScreenshotPath()">+ Add Screenshot</button>
+        </div>
+        <div id="screenspreview" class="imagepreview" style="display:flex; flex-direction:column; gap:8px; width:100%;">
+          ${renderScreenshotsListHtml()}
         </div>
       </div>
       
       <div class="actions">
-        <button class="btn primary" type="submit" id="save-project-btn">Publish to Website ↗</button>
-        <button class="btn" type="button" onclick="goto('admin/projects')">Cancel</button>
+        <button class="btn primary" type="submit" id="save-project-btn">${id ? 'Save Changes ↗' : 'Publish Project ↗'}</button>
+        <button class="btn" type="button" onclick="cancelProjectEdit()">Cancel</button>
       </div>
     </form>
   `, 'projects');
 }
 
-function readFile(file) {
-  return new Promise((resolve, reject) => {
-    if (!file) return resolve(null);
-    if (file.size > 2 * 1024 * 1024) return reject(new Error('Image must be under 2MB for Firestore storage.'));
-    let r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = () => reject(new Error('Could not read file.'));
-    r.readAsDataURL(file);
-  });
-}
-
-async function previewCover(input) {
-  try {
-    data.coverDraft = await readFile(input.files[0]);
-    $('#coverpreview').innerHTML = data.coverDraft ? `<div class="imageitem"><img src="${data.coverDraft}"><button type="button" onclick="removeCover()">×</button></div>` : '';
-  } catch (e) {
-    toast(e.message, true);
+function renderCoverPreviewHtml(path) {
+  if (!path) {
+    return '<div class="hint" style="padding:12px; background:var(--surface-alt); border:1px dashed var(--line); border-radius:var(--radius-xs);">No cover image path specified. Enter a path above to see live preview.</div>';
   }
-}
-
-function removeCover() {
-  data.coverDraft = null;
-  $('#coverfile').value = '';
-  $('#coverpreview').innerHTML = '';
-}
-
-async function previewScreens(input) {
-  try {
-    let files = Array.from(input.files);
-    for (let f of files) {
-      let base64 = await readFile(f);
-      if (base64) data.formImages.push(base64);
-    }
-    drawNewScreens();
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-function drawNewScreens() {
-  let box = $('#screenspreview');
-  if (!box) return;
-  box.innerHTML = (data.formImages || []).map((im, i) => `
-    <div class="imageitem">
-      <img src="${typeof im === 'string' ? im : im.src}" alt="Screenshot">
-      <button type="button" onclick="removeExistingScreenshot(${i})">×</button>
+  const resolved = resolveImageUrl(path);
+  return `
+    <div style="display:flex; align-items:flex-start; gap:16px; background:var(--surface-alt); padding:14px; border:1px solid var(--line); border-radius:var(--radius-xs); width:100%; box-sizing:border-box;">
+      <div style="width:160px; height:90px; border-radius:var(--radius-xs); overflow:hidden; border:1px solid var(--line); background:#fff; flex-shrink:0;">
+        <img src="${esc(resolved)}" alt="Cover preview" style="width:100%; height:100%; object-fit:cover;" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;$('#cover-err-msg')?.removeAttribute('hidden');">
+      </div>
+      <div style="flex:1; min-width:0;">
+        <strong style="font-size:13px; color:var(--text); display:block; margin-bottom:4px;">Cover Preview</strong>
+        <code style="font-size:12px; word-break:break-all; color:var(--muted);">${esc(path)}</code>
+        <div id="cover-err-msg" style="color:var(--danger); font-size:12px; margin-top:6px;" hidden>Image not found or inaccessible at this path. Verify that file exists in <code>assets/</code> or URL is reachable.</div>
+      </div>
+      <button class="btn small" type="button" onclick="clearCoverPath()">Clear</button>
     </div>
-  `).join('');
+  `;
 }
 
-function removeExistingScreenshot(i) {
+function updateCoverPreview(val) {
+  const trimmed = (val || '').trim();
+  data.coverDraft = trimmed;
+  const box = $('#coverpreview');
+  if (box) box.innerHTML = renderCoverPreviewHtml(trimmed);
+}
+
+function clearCoverPath() {
+  data.coverDraft = '';
+  if ($('#coverpath')) $('#coverpath').value = '';
+  const box = $('#coverpreview');
+  if (box) box.innerHTML = renderCoverPreviewHtml('');
+}
+
+function renderScreenshotsListHtml() {
+  const images = data.formImages || [];
+  if (!images.length) {
+    return '<div class="hint" style="padding:12px; background:var(--surface-alt); border:1px dashed var(--line); border-radius:var(--radius-xs); width:100%;">No gallery screenshots added yet. Add paths above.</div>';
+  }
+  return images.map((im, i) => {
+    const raw = typeof im === 'string' ? im : im.src;
+    const resolved = resolveImageUrl(raw);
+    return `
+      <div class="screenshot-row" style="display:flex; align-items:center; gap:14px; background:var(--surface-alt); padding:10px 14px; border:1px solid var(--line); border-radius:var(--radius-xs); width:100%; box-sizing:border-box;">
+        <span style="font-size:12px; font-weight:700; color:var(--muted); min-width:24px;">#${i + 1}</span>
+        <div style="width:80px; height:45px; border-radius:4px; overflow:hidden; border:1px solid var(--line); background:#fff; flex-shrink:0;">
+          <img src="${esc(resolved)}" alt="Screenshot ${i+1}" style="width:100%; height:100%; object-fit:cover;" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;">
+        </div>
+        <span style="flex:1; font-family:var(--font-mono); font-size:12.5px; color:var(--text); word-break:break-all; min-width:0;">${esc(raw)}</span>
+        <div style="display:flex; gap:6px; flex-shrink:0;">
+          ${i > 0 ? `<button type="button" class="btn small" title="Move Up" onclick="moveScreenshot(${i}, -1)">↑</button>` : ''}
+          ${i < images.length - 1 ? `<button type="button" class="btn small" title="Move Down" onclick="moveScreenshot(${i}, 1)">↓</button>` : ''}
+          <button type="button" class="btn small danger" title="Remove" onclick="removeScreenshotItem(${i})">✕</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function addScreenshotPath() {
+  const input = $('#newscreenpath');
+  if (!input) return;
+  const val = input.value.trim();
+  if (!val) return toast('Please enter an image path or URL.', true);
+  
+  const check = validateImagePath(val);
+  if (!check.valid) {
+    return toast(check.error, true);
+  }
+
+  data.formImages = data.formImages || [];
+  data.formImages.push(check.path);
+  input.value = '';
+  drawScreenshotsList();
+  toast('Screenshot path added.');
+}
+
+function removeScreenshotItem(i) {
+  if (!data.formImages || !data.formImages[i]) return;
   data.formImages.splice(i, 1);
-  drawNewScreens();
+  drawScreenshotsList();
+  toast('Screenshot removed.');
+}
+
+function moveScreenshot(i, direction) {
+  if (!data.formImages) return;
+  const targetIndex = i + direction;
+  if (targetIndex < 0 || targetIndex >= data.formImages.length) return;
+  const temp = data.formImages[i];
+  data.formImages[i] = data.formImages[targetIndex];
+  data.formImages[targetIndex] = temp;
+  drawScreenshotsList();
+}
+
+function drawScreenshotsList() {
+  const box = $('#screenspreview');
+  if (box) box.innerHTML = renderScreenshotsListHtml();
+}
+
+function cancelProjectEdit() {
+  data.coverDraft = undefined;
+  data.formImages = [];
+  data.editId = null;
+  goto('admin/projects');
 }
 
 function suggestSlug() {
@@ -1277,84 +1697,153 @@ function editProject(id) {
 
 async function saveProject() {
   let btn = $('#save-project-btn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Publishing to website...'; }
+  const defaultText = data.editId ? 'Save Changes ↗' : 'Publish Project ↗';
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving project to database...'; }
+
+  if (isOfflineMode || !isFirebaseReady) {
+    if (btn) { btn.disabled = false; btn.textContent = defaultText; }
+    return toast('Cannot publish projects while offline. Please connect to the internet.', true);
+  }
 
   let id = data.editId;
   let p = data.projects.find(x => x.id === id);
-  let name = $('#pname').value.trim();
-  let s = $('#pslug').value.trim() || slug(name);
-  let liveUrl = $('#plive').value.trim();
-  let desc = $('#pdesc').value.trim();
+  let name = ($('#pname')?.value || '').trim();
+  let s = ($('#pslug')?.value || '').trim() || slug(name);
+  let liveInput = ($('#plive')?.value || '').trim();
+  let liveUrl = sanitizeUrl(liveInput);
+  let desc = ($('#pdesc')?.value || '').trim();
   
-  if (!name || !desc) {
-    if (btn) { btn.disabled = false; btn.textContent = 'Publish to Website ↗'; }
-    return toast('Please complete the title and description.', true);
+  if (!name || name.length < 2) {
+    if (btn) { btn.disabled = false; btn.textContent = defaultText; }
+    return toast('Please enter a valid project title (at least 2 characters).', true);
   }
-  if (liveUrl && !/^https?:\/\//i.test(liveUrl)) liveUrl = 'https://' + liveUrl;
+
+  if (!desc || desc.length < 10) {
+    if (btn) { btn.disabled = false; btn.textContent = defaultText; }
+    return toast('Please enter a descriptive project summary (at least 10 characters).', true);
+  }
+
+  if (liveInput && !liveUrl) {
+    if (btn) { btn.disabled = false; btn.textContent = defaultText; }
+    return toast('Please enter a valid website URL starting with https:// or http://', true);
+  }
   
+  let featured = $('#pfeatured')?.checked || false;
   let visibility = document.querySelector('input[name="visibility"]:checked')?.value || 'published';
-  let cover = data.coverDraft !== undefined ? (data.coverDraft || '') : (p?.cover || '');
-  let screenshots = data.formImages || p?.screenshots || [];
+  
+  let coverInput = ($('#coverpath')?.value || '').trim();
+  let cover = coverInput;
+  if (cover) {
+    const checkCover = validateImagePath(cover);
+    if (!checkCover.valid) {
+      if (btn) { btn.disabled = false; btn.textContent = defaultText; }
+      return toast('Cover image: ' + checkCover.error, true);
+    }
+    cover = checkCover.path;
+  }
+  let screenshots = (data.formImages || []).map(s => typeof s === 'string' ? s : s?.src).filter(Boolean);
   
   let obj = {
-    name, slug: s, category: $('#pcategory')?.value || data.categories[0], description: desc, liveUrl, 
+    name,
+    slug: s,
+    category: $('#pcategory')?.value || data.categories[0],
+    description: desc,
+    liveUrl, 
     tags: ($('#ptags')?.value || '').split(',').map(x => x.trim()).filter(Boolean),
-    visibility, featured: p?.featured || false, cover, screenshots, 
-    createdAt: p?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString()
+    visibility,
+    featured,
+    cover,
+    screenshots, 
+    createdAt: p?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
   };
 
-  if (isFirebaseReady) {
-    try {
-      if (id) {
-        await dbInstance.collection('projects').doc(id).set(obj, { merge: true });
-        obj.id = id;
-        data.projects = data.projects.map(x => x.id === id ? obj : x);
-      } else {
-        const docRef = await dbInstance.collection('projects').add(obj);
-        obj.id = docRef.id;
-        data.projects.unshift(obj);
-      }
-    } catch(e) {
-      console.error(e);
-      if (btn) { btn.disabled = false; btn.textContent = 'Publish to Website ↗'; }
-      return toast("Could not write to Cloud Firestore: " + e.message, true);
+  try {
+    if (id) {
+      await dbInstance.collection('projects').doc(id).set(obj, { merge: true });
+      obj.id = id;
+      data.projects = data.projects.map(x => x.id === id ? obj : x);
+    } else {
+      const docRef = await dbInstance.collection('projects').add(obj);
+      obj.id = docRef.id;
+      data.projects.unshift(obj);
     }
-  } else {
-    obj.id = id || ('p_' + Date.now());
-    if (p) data.projects = data.projects.map(x => x.id === id ? obj : x);
-    else data.projects.unshift(obj);
+    await persistLocalCache();
+    data.coverDraft = undefined;
+    data.formImages = [];
+    data.editId = null;
+    toast('Project saved successfully!');
+    goto('admin/projects');
+  } catch(e) {
+    console.error('Project save error:', e);
+    if (btn) { btn.disabled = false; btn.textContent = defaultText; }
+    toast("Could not write to Cloud Firestore: " + e.message, true);
   }
-  
-  await persistLocal();
-  data.coverDraft = undefined;
-  data.editId = null;
-  toast('Project saved and published successfully!');
-  goto('');
 }
 
 async function togglePublish(id) {
   let p = data.projects.find(x => x.id === id);
   if (!p) return;
-  p.visibility = p.visibility === 'published' ? 'draft' : 'published';
-  if (isFirebaseReady) {
-    await dbInstance.collection('projects').doc(id).update({ visibility: p.visibility });
+  if (isOfflineMode || !isFirebaseReady) {
+    return toast('Cannot change visibility while offline.', true);
   }
-  await persistLocal();
-  toast(`Project set to ${p.visibility}.`);
-  render();
+  const nextVis = p.visibility === 'published' ? 'draft' : 'published';
+  try {
+    await dbInstance.collection('projects').doc(id).update({
+      visibility: nextVis,
+      updatedAt: new Date().toISOString()
+    });
+    p.visibility = nextVis;
+    await persistLocalCache();
+    toast(`Project set to ${p.visibility}.`);
+    render();
+  } catch (e) {
+    console.error('Toggle publish error:', e);
+    toast('Failed to update visibility: ' + e.message, true);
+  }
 }
 
 async function deleteProject(id) {
   let p = data.projects.find(x => x.id === id);
-  if (!p || !confirm(`Permanently remove "${p.name}"?`)) return;
-  if (isFirebaseReady) {
-    await dbInstance.collection('projects').doc(id).delete();
+  if (!p) return;
+  const relatedReviews = (data.feedback || []).filter(f => f.projectId === id).length;
+  const confirmMsg = `Permanently delete "${p.name}"?\n\nThis will remove the project along with ${relatedReviews} related community review(s). This action cannot be undone.`;
+  if (!confirm(confirmMsg)) return;
+
+  if (isOfflineMode || !isFirebaseReady) {
+    return toast('Cannot delete project while offline.', true);
   }
-  data.projects = data.projects.filter(x => x.id !== id);
-  data.feedback = (data.feedback || []).filter(f => f.projectId !== id);
-  await persistLocal();
-  toast('Project deleted.');
-  render();
+
+  toast('Deleting project and associated data...');
+
+  try {
+    const feedbackSnap = await dbInstance.collection('feedback').where('projectId', '==', id).get();
+    const reviewDocs = feedbackSnap.docs;
+
+    // Cascade delete reviews in sequential batches of 450 (Firestore limit is 500 ops per batch).
+    // Multiple batches are committed sequentially (non-atomic across batches).
+    const CHUNK_SIZE = 450;
+    for (let i = 0; i < reviewDocs.length; i += CHUNK_SIZE) {
+      const chunk = reviewDocs.slice(i, i + CHUNK_SIZE);
+      const batch = dbInstance.batch();
+      chunk.forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      await batch.commit();
+    }
+
+    // Delete project document
+    await dbInstance.collection('projects').doc(id).delete();
+
+    data.projects = data.projects.filter(x => x.id !== id);
+    data.feedback = (data.feedback || []).filter(f => f.projectId !== id);
+    await persistLocalCache();
+    toast(`Project "${p.name}" and related reviews deleted.`);
+    render();
+  } catch(e) {
+    console.error('Delete project error:', e);
+    toast('Failed to delete project: ' + e.message, true);
+  }
 }
 
 function feedbackAdmin() {
@@ -1366,34 +1855,99 @@ function feedbackAdmin() {
       <div>
         <span class="kicker">Moderation</span>
         <h1>Community Reviews</h1>
+        <p style="color:var(--muted);margin:4px 0;">Review, verify, and moderate feedback submitted across your software projects.</p>
       </div>
-      <div class="stat"><span>Average rating</span><strong>${avg} ★</strong></div>
+      <div style="display:flex;gap:12px;align-items:center;">
+        <div class="stat" style="min-width:140px;padding:12px 18px;"><span>Average rating</span><strong style="font-size:24px;">${avg} ★</strong></div>
+        <div class="stat" style="min-width:120px;padding:12px 18px;"><span>Total reviews</span><strong style="font-size:24px;">${fs.length}</strong></div>
+      </div>
     </div>
-    <div class="panel">
-      <h2>All Reviews (${fs.length})</h2>
-      ${fs.map(f => `
-        <article class="review-admin">
-          <div>
-            <strong>${esc(f.userName || 'User')}</strong> <span style="color:#059669;">${'★'.repeat(f.rating)}</span>
-            <p style="margin:4px 0;">${esc(f.message || 'No written text')}</p>
-            <span class="hint">${esc(f.userEmail || '')} ·${new Date(f.createdAt).toLocaleString()}</span>
-          </div>
-          <button class="btn small danger" onclick="deleteFeedback('${f.id}')">Delete</button>
-        </article>
-      `).join('') || '<div class="empty">No reviews logged yet.</div>'}
+    
+    <div class="toolbar" style="margin-bottom:20px;">
+      <input class="field search" id="feedbacksearch" placeholder="Search reviews by user, message, or project..." oninput="filterAdminFeedback()">
+      <select class="field" id="feedbackratingfilter" onchange="filterAdminFeedback()">
+        <option value="">All ratings (1-5 ★)</option>
+        <option value="5">5 Stars only</option>
+        <option value="4">4 Stars</option>
+        <option value="3">3 Stars</option>
+        <option value="2">2 Stars</option>
+        <option value="1">1 Star</option>
+      </select>
+    </div>
+
+    <div class="panel" id="feedbackadminlist">
+      ${renderFeedbackAdminList(fs)}
     </div>
   `, 'feedback');
 }
 
-async function deleteFeedback(id) {
-  if (!confirm('Permanently remove this review?')) return;
-  if (isFirebaseReady) {
-    await dbInstance.collection('feedback').doc(id).delete();
+function renderFeedbackAdminList(reviews) {
+  if (!reviews.length) {
+    return '<div class="empty"><strong>No reviews found.</strong><p style="margin:4px 0 0;">No community reviews match the current filter.</p></div>';
   }
-  data.feedback = (data.feedback || []).filter(f => f.id !== id);
-  await persistLocal();
-  toast('Review deleted.');
-  render();
+  return reviews.map(f => {
+    const proj = data.projects.find(p => p.id === f.projectId);
+    const projName = proj ? proj.name : 'Unknown Project (' + f.projectId + ')';
+    return `
+      <article class="review-admin" style="display:flex;gap:16px;align-items:flex-start;padding:18px 0;border-bottom:1px solid var(--line);">
+        ${getAvatarHTML(f.userPhoto, 40, 22)}
+        <div style="flex:1;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:6px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <strong style="font-size:15px;color:var(--text);">${esc(f.userName || 'Community User')}</strong>
+              <span class="card-category" style="font-size:11.5px;">For: ${esc(projName)}</span>
+            </div>
+            <span style="font-size:12px;color:var(--muted);">${new Date(f.createdAt).toLocaleString()}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span style="color:#059669;letter-spacing:2px;font-size:14px;">${'★'.repeat(f.rating)}<span style="color:#cbd5e1;">${'★'.repeat(5 - f.rating)}</span></span>
+            <span style="font-size:12px;color:var(--muted);">${esc(f.userEmail || '')}</span>
+          </div>
+          <p style="margin:0 0 8px;font-size:14px;color:var(--text);line-height:1.5;">${f.message ? esc(f.message) : '<em style="color:var(--muted);">No written text provided.</em>'}</p>
+        </div>
+        <button class="btn small danger" type="button" onclick="confirmDeleteFeedback('${f.id}','${esc(f.userName || 'User')}','${esc(projName)}')">Delete</button>
+      </article>
+    `;
+  }).join('');
+}
+
+function filterAdminFeedback() {
+  let q = ($('#feedbacksearch')?.value || '').toLowerCase().trim();
+  let rating = $('#feedbackratingfilter')?.value || '';
+  let fs = (data.feedback || []).filter(f => {
+    const proj = data.projects.find(p => p.id === f.projectId);
+    const matchRating = !rating || String(f.rating) === rating;
+    const matchQuery = !q || [f.userName, f.userEmail, f.message, proj?.name || ''].join(' ').toLowerCase().includes(q);
+    return matchRating && matchQuery;
+  });
+  fs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const listEl = $('#feedbackadminlist');
+  if (listEl) listEl.innerHTML = renderFeedbackAdminList(fs);
+}
+
+async function confirmDeleteFeedback(id, userName, projName) {
+  if (!confirm(`Permanently remove review from "${userName}" for "${projName}"?`)) return;
+  await deleteFeedback(id);
+}
+
+async function deleteFeedback(id) {
+  if (isOfflineMode || !isFirebaseReady) {
+    return toast('Cannot delete review while offline.', true);
+  }
+  try {
+    await dbInstance.collection('feedback').doc(id).delete();
+    data.feedback = (data.feedback || []).filter(f => f.id !== id);
+    await persistLocalCache();
+    toast('Review deleted successfully.');
+    if (currentRoute() === 'admin/feedback') {
+      filterAdminFeedback();
+    } else {
+      render();
+    }
+  } catch(e) {
+    console.error('Delete feedback error:', e);
+    toast('Failed to delete review: ' + e.message, true);
+  }
 }
 
 /* --- APP ROUTER --- */
@@ -1408,7 +1962,10 @@ function render() {
     }
     $('#app').innerHTML = home();
     $('#search')?.addEventListener('input', fillExplore);
-    $('#filtercat')?.addEventListener('change', fillExplore);
+    $('#filtercat')?.addEventListener('change', () => {
+      updateCategoryChips($('#filtercat').value);
+      fillExplore();
+    });
     $('#sort')?.addEventListener('change', fillExplore);
     fillExplore();
     if (r.startsWith('projects/')) setTimeout(() => openProjectDetail(decodeURIComponent(r.slice(9))), 0);
@@ -1443,7 +2000,12 @@ window.addEventListener('hashchange', () => {
 });
 
 window.addEventListener('keydown', e => { 
-  if (e.key === 'Escape') { closeLightbox(); closeProjectModal(); } 
+  if (e.key === 'Escape') { 
+    closeLightbox(); 
+    closeProjectModal(); 
+    document.querySelector('#footerinfomodal')?.remove();
+    closeMobileNav();
+  } 
 });
 $('#lightbox')?.addEventListener('click', e => { if (e.target.id === 'lightbox') closeLightbox(); });
 $('#projectmodal')?.addEventListener('click', e => { if (e.target.id === 'projectmodal') closeProjectModal(); });
@@ -1452,13 +2014,23 @@ function openLightbox(id, i) {
   let p = data.projects.find(x => x.id === id);
   let im = p?.screenshots?.[i] || (p?.cover ? {src: p.cover, alt: p.name} : null);
   let src = typeof im === 'string' ? im : im?.src;
-  if (src) {
-    $('#lightboximg').src = src;
-    $('#lightboximg').alt = p.name;
+  const resolved = resolveImageUrl(src);
+  if (resolved) {
+    lastFocusedElement = document.activeElement;
+    $('#lightboximg').src = resolved;
+    $('#lightboximg').onerror = () => { $('#lightboximg').src = FALLBACK_IMAGE; };
+    $('#lightboximg').alt = p.name || 'Preview image';
     $('#lightbox').classList.remove('hidden');
+    setTimeout(() => { $('#lightbox .btn')?.focus(); }, 40);
   }
 }
-function closeLightbox() { $('#lightbox').classList.add('hidden'); }
+function closeLightbox() { 
+  $('#lightbox').classList.add('hidden'); 
+  if (lastFocusedElement && typeof lastFocusedElement.focus === 'function') {
+    lastFocusedElement.focus();
+    lastFocusedElement = null;
+  }
+}
 
 (async () => {
   await loadData();

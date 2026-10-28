@@ -1,0 +1,62 @@
+rules_version = '2';
+
+// Cloud Storage Security Rules for NexusHub
+// Project: nexushub-955d4
+// Storage Bucket: nexushub-955d4.firebasestorage.app
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Default Deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Verified owner authorization
+    function isOwner() {
+      return isAuthenticated() &&
+        'email' in request.auth.token &&
+        request.auth.token.email.lower() == 'ayushpathak200718@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
+    // Check if uploaded file is a safe, validated image type (SVG disallowed for security)
+    function isImage() {
+      return request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+
+    // Project media assets (covers, screenshots)
+    match /projects/{projectId}/{allPaths=**} {
+      // Public can view project images
+      allow read: if true;
+
+      // Only owner can upload project assets; max 5MB image
+      allow write: if isOwner() &&
+                      isImage() &&
+                      request.resource.size <= 5 * 1024 * 1024;
+
+      // Only owner can delete project assets
+      allow delete: if isOwner();
+    }
+
+    // User profile images & uploads
+    match /users/{userId}/{allPaths=**} {
+      // Public can view user profile avatars
+      allow read: if true;
+
+      // Authenticated users can upload to their own directory; max 2MB image
+      allow write: if isAuthenticated() &&
+                      request.auth.uid == userId &&
+                      isImage() &&
+                      request.resource.size <= 2 * 1024 * 1024;
+
+      // User or site owner can delete avatar files
+      allow delete: if (isAuthenticated() && request.auth.uid == userId) || isOwner();
+    }
+  }
+}

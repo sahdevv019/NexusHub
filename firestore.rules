@@ -1,48 +1,32 @@
 rules_version = '2';
 
 // ===============================================================
-// Assumed Data Model
+// NexusHub Production Cloud Firestore Security Rules (Milestone 7 Hardened)
 // ===============================================================
 //
-// This security rules file assumes the following data structures:
+// Data Model & Privacy Architecture:
 //
-// Collection: projects
-// Document ID: string (auto-generated ID or slug)
-// Fields:
-//   - name: string (1-100 chars, required) - Project title
-//   - slug: string (1-90 chars, required) - URL slug identifier
-//   - category: string (1-50 chars, required) - Project category
-//   - description: string (1-1000 chars, required) - Project summary
-//   - liveUrl: string (optional, URL, <= 500 chars) - Live preview link
-//   - githubUrl: string (optional, URL, <= 500 chars) - Source code link
-//   - tags: list of strings (0-20 items, each <= 30 chars) - Project tags
-//   - visibility: string (enum: 'published' | 'draft', required) - Access state
-//   - featured: bool (optional) - Showcase on home page
-//   - cover: string (optional, URL/DataURL, <= 2000 chars) - Cover image
-//   - screenshots: list of strings (optional, <= 15 items) - Screenshot gallery
-//   - createdAt: string (ISO 8601 date, required, immutable on update)
-//   - updatedAt: string (ISO 8601 date, required on update)
+// 1. Collection: projects
+//    - Public read for published projects; owner read for all projects
+//    - Owner write (create, update, delete) only
 //
-// Collection: feedback
-// Document ID: string ('${projectId}_${userId}' or auto-generated ID)
-// Fields:
-//   - projectId: string (1-100 chars, required, immutable) - Target project ID
-//   - userId: string (required, immutable, must match request.auth.uid)
-//   - rating: int (1-5, required) - Numeric star rating
-//   - message: string (optional, <= 500 chars) - User review text
-//   - userName: string (1-50 chars, required) - Reviewer display name
-//   - userEmail: string (optional, <= 100 chars) - Reviewer email
-//   - userPhoto: string (optional, <= 500 chars) - Reviewer emoji or avatar URL
-//   - createdAt: string (ISO 8601 date, required) - Review timestamp
+// 2. Collection: feedback
+//    - Public read for community reviews on published projects
+//    - Authenticated create with deterministic ID: {projectId}_{userId}
+//    - Referenced project MUST exist and be published
+//    - User emails strictly EXCLUDED from public feedback documents (Privacy Priority 1)
+//    - Author update only; projectId, userId, createdAt are strictly immutable
+//    - Author delete or owner moderation delete
 //
-// Collection: users
-// Document ID: string (must match request.auth.uid)
-// Fields:
-//   - username: string (3-25 chars, required) - Display username
-//   - username_lower: string (3-25 chars, required) - Lowercase username for uniqueness
-//   - emoji: string (1-50 chars, required) - Chosen avatar emoji
-//   - email: string (required, immutable on update, matches request.auth.token.email)
-//   - createdAt: string (ISO 8601 date, required, immutable on update)
+// 3. Collection: users (Private Profile Data)
+//    - Readable ONLY by the user themselves or the verified owner (Privacy Priority 1)
+//    - Contains user's private email, username, emoji, and createdAt
+//    - Public users CANNOT read user documents (eliminates email scraping)
+//
+// 4. Collection: usernames (Public Directory for Availability Checks)
+//    - Public read for checking username availability (contains NO emails)
+//    - Mapping: docId = lowercase username, fields = { uid, createdAt }
+//    - Claimed upon user registration or username update
 //
 // ===============================================================
 
@@ -114,6 +98,12 @@ service cloud.firestore {
       return lowerName in ['ayush', 'ayush pathak', 'owner', 'admin', 'administrator', 'nexushub'];
     }
 
+    // Verify that the target project exists and is published
+    function isPublishedProject(projectId) {
+      return exists(/databases/$(database)/documents/projects/$(projectId)) &&
+             get(/databases/$(database)/documents/projects/$(projectId)).data.visibility == 'published';
+    }
+
     // ===============================================================
     // Domain Validators
     // ===============================================================
@@ -137,17 +127,17 @@ service cloud.firestore {
         (!('updatedAt' in data) || isValidDateString(data.updatedAt));
     }
 
-    // Domain validator for 'feedback'
+    // Domain validator for 'feedback' (userEmail strictly excluded for privacy)
     function isValidFeedback(data) {
       return hasRequiredFields(['projectId', 'userId', 'rating', 'userName', 'createdAt']) &&
-        hasOnlyAllowedFields(['projectId', 'userId', 'rating', 'message', 'userName', 'userEmail', 'userPhoto', 'createdAt']) &&
+        hasOnlyAllowedFields(['projectId', 'userId', 'rating', 'message', 'userName', 'userPhoto', 'createdAt']) &&
         data.projectId is string && data.projectId.size() >= 1 && data.projectId.size() <= 100 &&
         data.userId is string && data.userId == request.auth.uid &&
         data.rating is int && data.rating >= 1 && data.rating <= 5 &&
         data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 50 &&
+        (!isReservedUsername(data.userName.lower()) || isOwner()) &&
         isValidDateString(data.createdAt) &&
         (!('message' in data) || (data.message is string && data.message.size() <= 500)) &&
-        (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 100 && (data.userEmail.size() == 0 || isValidEmail(data.userEmail)))) &&
         (!('userPhoto' in data) || (data.userPhoto is string && data.userPhoto.size() <= 500));
     }
 
@@ -158,11 +148,25 @@ service cloud.firestore {
         data.username is string && data.username.size() >= 3 && data.username.size() <= 25 &&
         data.username_lower is string && data.username_lower.size() >= 3 && data.username_lower.size() <= 25 &&
         data.username_lower == data.username.lower() &&
+        data.username_lower.matches('^[a-z0-9_.-]{3,25}$') &&
         (!isReservedUsername(data.username_lower) || isOwner()) &&
         data.emoji is string && data.emoji.size() >= 1 && data.emoji.size() <= 50 &&
         data.email is string && data.email.size() <= 100 && isValidEmail(data.email) &&
         ('email' in request.auth.token && data.email.lower() == request.auth.token.email.lower()) &&
         isValidDateString(data.createdAt);
+    }
+
+    // Domain validator for 'usernames' directory (Pre-Launch Tightened)
+    function isValidUsernameDoc(data, usernameLower) {
+      return hasRequiredFields(['uid', 'createdAt']) &&
+        hasOnlyAllowedFields(['uid', 'createdAt']) &&
+        data.uid is string && data.uid == request.auth.uid &&
+        isValidDateString(data.createdAt) &&
+        usernameLower is string &&
+        usernameLower.size() >= 3 && usernameLower.size() <= 25 &&
+        usernameLower == usernameLower.lower() &&
+        usernameLower.matches('^[a-z0-9_.-]{3,25}$') &&
+        (!isReservedUsername(usernameLower) || isOwner());
     }
 
     // ===============================================================
@@ -171,7 +175,7 @@ service cloud.firestore {
 
     // 1) 'projects' collection
     match /projects/{projectId} {
-      // Public can read published projects; owner can read all projects (including drafts)
+      // Public can read published projects; verified owner can read all projects (including drafts)
       allow read: if isOwner() || resource.data.visibility == 'published';
 
       // Only the verified owner can create new projects
@@ -193,27 +197,33 @@ service cloud.firestore {
       allow read: if true;
 
       // Authenticated users can submit feedback for a project.
-      // Strictly enforces deterministic document ID: {projectId}_{userId} to prevent duplicate reviews
+      // - Strictly enforces deterministic document ID: {projectId}_{userId} to prevent duplicate reviews
+      // - Requires valid feedback schema without user email
+      // - Referenced project MUST exist and have visibility == 'published'
       allow create: if isAuthenticated() &&
                        isValidFeedback(request.resource.data) &&
-                       feedbackId == request.resource.data.projectId + '_' + request.auth.uid;
+                       feedbackId == request.resource.data.projectId + '_' + request.auth.uid &&
+                       isPublishedProject(request.resource.data.projectId);
 
-      // Authors can update their own feedback; projectId and userId are immutable
-      // Allows updates on both deterministic IDs and legacy review IDs
+      // Authors can update their own feedback:
+      // - Author verification
+      // - projectId, userId, and original createdAt are strictly immutable
       allow update: if isAuthenticated() &&
                        request.auth.uid == resource.data.userId &&
                        isValidFeedback(request.resource.data) &&
                        request.resource.data.projectId == resource.data.projectId &&
-                       request.resource.data.userId == resource.data.userId;
+                       request.resource.data.userId == resource.data.userId &&
+                       request.resource.data.createdAt == resource.data.createdAt;
 
-      // Either the review author or the project owner can delete reviews
+      // Either the review author or the verified project owner can delete reviews
       allow delete: if (isAuthenticated() && request.auth.uid == resource.data.userId) || isOwner();
     }
 
-    // 3) 'users' collection
+    // 3) 'users' collection (Private User Profiles)
     match /users/{userId} {
-      // Public read allowed for displaying reviewer avatars, emojis, and username availability queries
-      allow read: if true;
+      // Privacy Protection (Priority 1):
+      // Only the user themselves or the verified owner can read this profile document (contains private email)
+      allow read: if isUser(userId) || isOwner();
 
       // Authenticated user can create their own profile document (document ID must match UID)
       allow create: if isUser(userId) &&
@@ -227,6 +237,26 @@ service cloud.firestore {
 
       // Either the user themselves or the owner can delete the user document
       allow delete: if isUser(userId) || isOwner();
+    }
+
+    // 4) 'usernames' collection (Public Username Availability Directory)
+    match /usernames/{usernameLower} {
+      // Public read allows checking if a username is already claimed (contains NO private emails)
+      allow read: if true;
+
+      // Authenticated users can claim an available username mapping to their own UID
+      allow create: if isAuthenticated() &&
+                       isValidUsernameDoc(request.resource.data, usernameLower);
+
+      // Authors can update their claimed username record; UID and createdAt are strictly immutable, exact allowed fields enforced
+      allow update: if isAuthenticated() &&
+                       resource.data.uid == request.auth.uid &&
+                       isValidUsernameDoc(request.resource.data, usernameLower) &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.createdAt == resource.data.createdAt;
+
+      // Author can release username claim, or verified owner can moderate
+      allow delete: if isAuthenticated() && (resource.data.uid == request.auth.uid || isOwner());
     }
   }
 }

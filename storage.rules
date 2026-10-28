@@ -1,8 +1,10 @@
 rules_version = '2';
 
-// Cloud Storage Security Rules for NexusHub
+// Cloud Storage Security Rules for NexusHub (Milestone 7 Hardened)
 // Project: nexushub-955d4
-// Storage Bucket: nexushub-955d4.firebasestorage.app
+// Note: Project images are now hosted directly in Git repository static assets (/assets/projects/...).
+// Firebase Storage is retained purely for backward-compatible read access to legacy assets.
+// Direct writes and arbitrary uploads to Firebase Storage are strictly disabled.
 
 service firebase.storage {
   match /b/{bucket}/o {
@@ -30,32 +32,27 @@ service firebase.storage {
       return request.resource.contentType.matches('image/(jpeg|png|webp)');
     }
 
-    // Project media assets (covers, screenshots)
+    // Project media assets (legacy covers, screenshots)
     match /projects/{projectId}/{allPaths=**} {
-      // Public can view project images
+      // Public can view existing legacy project images
       allow read: if true;
 
-      // Only owner can upload project assets; max 5MB image
-      allow write: if isOwner() &&
-                      isImage() &&
-                      request.resource.size <= 5 * 1024 * 1024;
+      // New uploads are strictly disallowed (images are stored as static repository assets)
+      allow write: if false;
 
-      // Only owner can delete project assets
+      // Only verified owner can delete legacy project assets if manual cleanup is needed
       allow delete: if isOwner();
     }
 
-    // User profile images & uploads
+    // User profile images (legacy avatars if any)
     match /users/{userId}/{allPaths=**} {
-      // Public can view user profile avatars
+      // Legacy user avatars are readable
       allow read: if true;
 
-      // Authenticated users can upload to their own directory; max 2MB image
-      allow write: if isAuthenticated() &&
-                      request.auth.uid == userId &&
-                      isImage() &&
-                      request.resource.size <= 2 * 1024 * 1024;
+      // New user uploads are disabled (avatars use auth photoURL or local SVG/emoji)
+      allow write: if false;
 
-      // User or site owner can delete avatar files
+      // User or verified owner can remove legacy avatar
       allow delete: if (isAuthenticated() && request.auth.uid == userId) || isOwner();
     }
   }

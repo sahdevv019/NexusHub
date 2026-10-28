@@ -108,19 +108,29 @@ function sanitizeUrl(url) {
 // Neutral SVG fallback image to prevent broken image icons (Milestone 6)
 const FALLBACK_IMAGE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 450' fill='%23E9EEE8'%3E%3Crect width='800' height='450' fill='%23F0F3EF'/%3E%3Cg fill='%2324745B' opacity='0.3'%3E%3Crect x='340' y='170' width='120' height='80' rx='12'/%3E%3Ccircle cx='375' cy='195' r='12'/%3E%3Cpath d='M348 238l30-30 20 20 25-25 29 35z'/%3E%3C/g%3E%3Ctext x='400' y='285' fill='%2366736C' font-family='system-ui, sans-serif' font-size='15' font-weight='600' text-anchor='middle'%3ENo Image Available%3C/text%3E%3C/svg%3E";
 
-// Validate static image path or legacy/external HTTPS image URL (Milestone 6)
+// Validate static image path or legacy/external HTTPS image URL (Milestone 7 Hardened)
 function validateImagePath(path) {
   if (!path || typeof path !== 'string') return { valid: false, error: 'Path cannot be empty.' };
   const s = path.trim();
-  if (/^(javascript|vbscript|data):/i.test(s)) {
-    return { valid: false, error: 'Dangerous URI schemes (javascript:, data:) are disallowed.' };
+  // Reject control characters, newlines, and unencoded spaces
+  if (/[\x00-\x1f\x7f\s]/.test(s)) {
+    return { valid: false, error: 'Path contains spaces or control characters.' };
   }
-  if (/\.\.[\/\\]/.test(s)) {
+  // Reject dangerous URI schemes
+  if (/^(javascript|vbscript|data|file|blob):/i.test(s)) {
+    return { valid: false, error: 'Dangerous URI schemes are disallowed.' };
+  }
+  // Reject path traversal attempts (..)
+  if (/\.\./.test(s)) {
     return { valid: false, error: 'Path traversal (..) is not allowed.' };
   }
-  // Allow root-relative static asset path (/assets/projects/...) or standard HTTP(S) URL
-  if (/^https?:\/\/[^\s<>"']+$/i.test(s) || /^\/?assets\/[a-zA-Z0-9_\-\.\/]+$/i.test(s)) {
-    return { valid: true, path: s.startsWith('assets/') ? '/' + s : s };
+  // Allow root-relative static asset path (/assets/projects/...) or general assets path
+  if (/^\/?assets\/[a-zA-Z0-9_\-\.\/]+$/i.test(s)) {
+    return { valid: true, path: s.startsWith('assets/') ? '/' + s : (s.startsWith('/') ? s : '/' + s) };
+  }
+  // Allow legacy Firebase Storage URLs and external HTTPS URLs
+  if (/^https:\/\/[a-zA-Z0-9_\-\.]+\.[a-zA-Z]{2,}(?::\d+)?(?:\/[^\s<>"']*)?$/i.test(s)) {
+    return { valid: true, path: s };
   }
   return { valid: false, error: 'Please enter a valid static path (/assets/projects/...) or https:// URL.' };
 }
@@ -129,11 +139,15 @@ function validateImagePath(path) {
 function resolveImageUrl(path) {
   if (!path || typeof path !== 'string') return '';
   const s = path.trim();
-  if (/^(javascript|vbscript):/i.test(s)) return '';
+  if (/[\x00-\x1f\x7f\s]/.test(s)) return '';
+  if (/^(javascript|vbscript|file|blob):/i.test(s)) return '';
   if (/^data:/i.test(s) && !s.startsWith('data:image/svg+xml')) return '';
-  if (/\.\.[\/\\]/.test(s)) return '';
-  if (s.startsWith('assets/')) return '/' + s;
-  return s;
+  if (/\.\./.test(s)) return '';
+  if (/^\/?assets\/[a-zA-Z0-9_\-\.\/]+$/i.test(s)) {
+    return s.startsWith('assets/') ? '/' + s : (s.startsWith('/') ? s : '/' + s);
+  }
+  if (/^https:\/\//i.test(s)) return s;
+  return '';
 }
 
 // Check if a URL belongs to our Firebase Storage bucket (preserved for backward compatibility)
@@ -162,15 +176,23 @@ const authState = {
           }
 
           if (!profileData) {
+            const defaultUsername = isOwner ? 'Ayush' : 'User' + Math.floor(1000 + Math.random() * 9000);
+            const defaultLower = defaultUsername.toLowerCase();
             profileData = {
-              username: isOwner ? 'Ayush' : 'User' + Math.floor(1000 + Math.random() * 9000),
-              username_lower: isOwner ? 'ayush' : ('user' + Math.floor(1000 + Math.random() * 9000)),
+              username: defaultUsername,
+              username_lower: defaultLower,
               emoji: isOwner ? '👑' : '👾',
               email: userEmail,
               createdAt: new Date().toISOString()
             };
             try {
-              await dbInstance.collection('users').doc(firebaseUser.uid).set(profileData);
+              const batch = dbInstance.batch();
+              batch.set(dbInstance.collection('users').doc(firebaseUser.uid), profileData);
+              batch.set(dbInstance.collection('usernames').doc(defaultLower), {
+                uid: firebaseUser.uid,
+                createdAt: profileData.createdAt
+              });
+              await batch.commit();
             } catch (e) {
               console.warn("Could not initialize profile document in Firestore:", e);
             }
@@ -598,7 +620,7 @@ function card(p) {
 
   return `
     <article class="project-card">
-      <div class="card-media" onclick="openProjectDetail('${esc(p.slug)}')">
+      <div class="card-media" data-slug="${esc(p.slug)}" onclick="openProjectDetail(this.dataset.slug)">
         ${p.cover ? `<img src="${esc(resolveImageUrl(p.cover))}" alt="${esc(p.name)}" loading="lazy" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;">` : `<div class="card-placeholder">${esc(p.name.slice(0, 2).toUpperCase())}</div>`}
         <div class="card-badges">
           <span class="card-category">${esc(p.category || 'General')}</span>
@@ -608,7 +630,7 @@ function card(p) {
       <div class="cardbody">
         <div class="card-header">
           <h3 class="card-title">
-            <a href="#projects" onclick="openProjectDetail('${esc(p.slug)}');return false">${esc(p.name)}</a>
+            <a href="#projects" data-slug="${esc(p.slug)}" onclick="openProjectDetail(this.dataset.slug);return false">${esc(p.name)}</a>
           </h3>
           <span class="badge-status ${statusClass}">${statusText}</span>
         </div>
@@ -618,7 +640,7 @@ function card(p) {
           ${(p.tags || []).slice(0, 3).map(t => `<span class="tag">${esc(t)}</span>`).join('')}
         </div>
         <div class="cardactions">
-          <button class="btn small" type="button" onclick="openProjectDetail('${esc(p.slug)}')">View Project</button>
+          <button class="btn small" type="button" data-slug="${esc(p.slug)}" onclick="openProjectDetail(this.dataset.slug)">View Project</button>
           ${safeLive ? `<a class="btn primary small" href="${esc(safeLive)}" target="_blank" rel="noopener noreferrer">Launch ↗</a>` : ''}
         </div>
       </div>
@@ -649,7 +671,7 @@ function home() {
             <div class="spotlight-address" title="${siteHost}/${esc(featured.slug)}">${siteHost}/${esc(featured.slug)}</div>
             <span class="spotlight-chip">${esc(featured.category || 'Featured')}</span>
           </div>
-          <div class="spotlight-preview" onclick="openProjectDetail('${esc(featured.slug)}')">
+          <div class="spotlight-preview" data-slug="${esc(featured.slug)}" onclick="openProjectDetail(this.dataset.slug)">
             ${featured.cover ? `<img src="${esc(resolveImageUrl(featured.cover))}" alt="${esc(featured.name)}" loading="eager" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;">` : `<div class="spotlight-placeholder"><span>${esc(featured.name.slice(0, 2).toUpperCase())}</span><div class="spotlight-subtext">Featured Showcase</div></div>`}
           </div>
           <div class="spotlight-footer">
@@ -657,7 +679,7 @@ function home() {
               <div class="spotlight-title">${esc(featured.name)}</div>
               <div class="spotlight-desc">${esc(featured.description.slice(0, 75))}…</div>
             </div>
-            <button class="btn small primary" type="button" onclick="openProjectDetail('${esc(featured.slug)}')">View Details →</button>
+            <button class="btn small primary" type="button" data-slug="${esc(featured.slug)}" onclick="openProjectDetail(this.dataset.slug)">View Details →</button>
           </div>
         </div>
       </div>
@@ -939,7 +961,7 @@ function profilePage() {
                     ${r.message ? `<p style="margin: 0; color: #525252; font-size: 14px; line-height: 1.5;">${esc(r.message)}</p>` : `<em style="color: var(--muted); font-size: 13px;">No comment written</em>`}
                     <div style="font-size: 11px; color: var(--muted); margin-top: 8px;">${new Date(r.createdAt).toLocaleDateString()}</div>
                   </div>
-                  <button class="btn small danger" id="del-rev-${r.id}" onclick="deleteUserReview('${r.id}')">Delete Review</button>
+                  <button class="btn small danger" id="del-rev-${r.id}" data-review-id="${esc(r.id)}" onclick="deleteUserReview(this.dataset.reviewId)">Delete Review</button>
                 </div>
               `;
             }).join('')}
@@ -970,6 +992,7 @@ async function saveProfileData() {
   let lowerName = newName.toLowerCase();
 
   if (newName.length < 3 || newName.length > 25) return toast('Username must be between 3 and 25 characters.', true);
+  if (!/^[a-zA-Z0-9_.-]{3,25}$/.test(newName)) return toast('Username can only contain letters, numbers, underscores, hyphens, and periods.', true);
 
   const reserved = ['ayush', 'ayush pathak', 'owner', 'admin', 'administrator', 'nexushub'];
   if (reserved.includes(lowerName) && !authState.user.isOwner) {
@@ -981,11 +1004,10 @@ async function saveProfileData() {
   }
 
   try {
-    let snap = await dbInstance.collection('users').where('username_lower', '==', lowerName).get();
-    let isTaken = false;
-    snap.forEach(doc => { if (doc.id !== authState.user.uid) isTaken = true; });
-
-    if (isTaken) return toast('Username is already taken by another user!', true);
+    const usernameDoc = await dbInstance.collection('usernames').doc(lowerName).get();
+    if (usernameDoc.exists && usernameDoc.data().uid !== authState.user.uid) {
+      return toast('Username is already taken by another user!', true);
+    }
 
     const userDocRef = dbInstance.collection('users').doc(authState.user.uid);
     const existingSnap = await userDocRef.get();
@@ -999,7 +1021,16 @@ async function saveProfileData() {
       createdAt: existing.createdAt || new Date().toISOString()
     };
 
-    await userDocRef.set(profileData, { merge: true });
+    const batch = dbInstance.batch();
+    if (existing.username_lower && existing.username_lower !== lowerName) {
+      batch.delete(dbInstance.collection('usernames').doc(existing.username_lower));
+    }
+    batch.set(dbInstance.collection('usernames').doc(lowerName), {
+      uid: authState.user.uid,
+      createdAt: profileData.createdAt
+    });
+    batch.set(userDocRef, profileData, { merge: true });
+    await batch.commit();
 
     authState.user.name = newName;
     authState.user.picture = newEmoji;
@@ -1077,7 +1108,7 @@ function openProjectDetail(projectSlug) {
         ${allImages.map((im, i) => {
           const raw = typeof im === 'string' ? im : im.src;
           const resolved = resolveImageUrl(raw);
-          return `<img src="${esc(resolved)}" alt="Screenshot" loading="lazy" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;" onclick="openLightbox('${p.id}',${i})">`;
+          return `<img src="${esc(resolved)}" alt="Screenshot" loading="lazy" onerror="this.onerror=null;this.src=FALLBACK_IMAGE;" data-project-id="${esc(p.id)}" data-index="${i}" onclick="openLightbox(this.dataset.projectId, Number(this.dataset.index))">`;
         }).join('')}
       </div>
     `;
@@ -1168,14 +1199,14 @@ function feedbackSection(p) {
           <span style="font-size:12px;color:var(--muted);">${userExistingReview ? 'Editing your review & rating' : 'Write a review'}</span>
         </div>
       </div>
-      <form onsubmit="event.preventDefault();submitFeedback('${p.id}')">
+      <form data-project-id="${esc(p.id)}" onsubmit="event.preventDefault();submitFeedback(this.dataset.projectId)">
         <div class="star-row" id="feedbackstars" style="display:flex;gap:12px;margin-bottom:16px;">
           ${[1, 2, 3, 4, 5].map(n => `<button type="button" style="background:none;border:none;font-size:36px;color:${(activeRating >= n) ? '#059669' : '#cbd5e1'};cursor:pointer;padding:0;line-height:1;" aria-label="${n} stars" onclick="chooseFeedbackRating(${n})">★</button>`).join('')}
         </div>
         <div class="feedback-grid" style="display:grid;grid-template-columns:1fr;gap:12px;" id="feedbackformwrap">
           <textarea id="feedbackmessage" class="field" maxlength="500" placeholder="Write your review for ${esc(p.name)}..." style="min-height:80px;">${esc(userExistingReview?.message || '')}</textarea>
           <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;margin-top:4px;">
-            ${userExistingReview ? `<button type="button" class="btn small danger" onclick="deleteUserReviewModal('${userExistingReview.id}','${esc(p.slug)}')">Delete My Review</button>` : ''}
+            ${userExistingReview ? `<button type="button" class="btn small danger" data-review-id="${esc(userExistingReview.id)}" data-slug="${esc(p.slug)}" onclick="deleteUserReviewModal(this.dataset.reviewId, this.dataset.slug)">Delete My Review</button>` : ''}
             <button class="btn primary" type="submit" id="submit-review-btn" style="border-radius:999px;">${userExistingReview ? 'Update Review' : 'Post Review'}</button>
           </div>
         </div>
@@ -1235,7 +1266,7 @@ function feedbackSection(p) {
                 ${f.message ? `<p style="margin:0;font-size:14px;color:#525252;line-height:1.5;">${esc(f.message)}</p>` : ''}
               </div>
               ${(authState.user && (authState.user.uid === f.userId || authState.user.isOwner)) ? `
-                <button class="btn small danger" id="del-rev-modal-${f.id}" onclick="deleteUserReviewModal('${f.id}','${p.slug}')">Delete</button>
+                <button class="btn small danger" id="del-rev-modal-${f.id}" data-review-id="${esc(f.id)}" data-slug="${esc(p.slug)}" onclick="deleteUserReviewModal(this.dataset.reviewId, this.dataset.slug)">Delete</button>
               ` : ''}
             </article>
           `).join('')}
@@ -1295,7 +1326,6 @@ async function submitFeedback(projectId) {
     rating: Math.round(rating),
     message: message,
     userName: authState.user.name,
-    userEmail: authState.user.email || '',
     userPhoto: authState.user.picture || '👾',
     createdAt: existingReview ? (existingReview.createdAt || new Date().toISOString()) : new Date().toISOString()
   };
@@ -1418,9 +1448,9 @@ function projectTable(ps) {
               <td><span class="status ${p.visibility}">${p.visibility}</span></td>
               <td>
                 <div class="rowactions">
-                  <button class="btn small" onclick="editProject('${p.id}')">Edit</button>
-                  <button class="btn small" onclick="togglePublish('${p.id}')">${p.visibility === 'published' ? 'Unpublish' : 'Publish'}</button>
-                  <button class="btn small danger" onclick="deleteProject('${p.id}')">Delete</button>
+                  <button class="btn small" data-id="${esc(p.id)}" onclick="editProject(this.dataset.id)">Edit</button>
+                  <button class="btn small" data-id="${esc(p.id)}" onclick="togglePublish(this.dataset.id)">${p.visibility === 'published' ? 'Unpublish' : 'Publish'}</button>
+                  <button class="btn small danger" data-id="${esc(p.id)}" onclick="deleteProject(this.dataset.id)">Delete</button>
                 </div>
               </td>
             </tr>
@@ -1905,7 +1935,7 @@ function renderFeedbackAdminList(reviews) {
           </div>
           <p style="margin:0 0 8px;font-size:14px;color:var(--text);line-height:1.5;">${f.message ? esc(f.message) : '<em style="color:var(--muted);">No written text provided.</em>'}</p>
         </div>
-        <button class="btn small danger" type="button" onclick="confirmDeleteFeedback('${f.id}','${esc(f.userName || 'User')}','${esc(projName)}')">Delete</button>
+        <button class="btn small danger" type="button" data-id="${esc(f.id)}" data-user-name="${esc(f.userName || 'User')}" data-project-name="${esc(projName)}" onclick="confirmDeleteFeedback(this.dataset.id, this.dataset.userName, this.dataset.projectName)">Delete</button>
       </article>
     `;
   }).join('');

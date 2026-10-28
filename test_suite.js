@@ -269,6 +269,21 @@ assert(html.includes('moveScreenshot('), 'moveScreenshot allows reordering scree
 assert(html.includes('removeScreenshotItem('), 'removeScreenshotItem allows removing screenshots');
 assert(html.includes('onerror="this.onerror=null;this.src=FALLBACK_IMAGE;"'), 'Image elements include graceful fallback on error');
 
+// 11. Milestone 7: Security Hardening Checks
+console.log('\n▶ [MILESTONE 7] Production Security Hardening Checks:');
+assert(vercelJson.headers.some(h => h.headers.some(item => item.key === 'Content-Security-Policy')), 'vercel.json configures Content-Security-Policy (CSP)');
+assert(vercelJson.headers.some(h => h.headers.some(item => item.key === 'Permissions-Policy')), 'vercel.json configures Permissions-Policy');
+assert(firestoreRules.includes('isPublishedProject('), 'firestore.rules enforces isPublishedProject verification for reviews');
+assert(firestoreRules.includes('match /usernames/{usernameLower}'), 'firestore.rules provides public usernames directory for availability checks');
+assert(firestoreRules.includes('allow read: if isUser(userId) || isOwner();'), 'firestore.rules restricts users/{userId} read to self or owner (Priority 1 email privacy)');
+assert(!firestoreRules.includes("'userEmail'") && firestoreRules.includes("hasOnlyAllowedFields(['projectId', 'userId', 'rating', 'message', 'userName', 'userPhoto', 'createdAt'])"), 'firestore.rules excludes userEmail from feedback schema');
+assert(storageRules.includes('allow write: if false;'), 'storage.rules disables arbitrary new uploads to Firebase Storage (Priority 4)');
+assert(html.includes("collection('usernames').doc(lowerName).get()"), 'index.html checks username availability against public usernames collection');
+assert(!jsCode.includes("userEmail: authState.user.email"), 'index.html submitFeedback does not store userEmail in feedback documents');
+assert(sandbox.validateImagePath('/assets/bad url/pic.webp').valid === false, 'validateImagePath rejects unencoded whitespace in paths');
+assert(sandbox.validateImagePath('javascript:alert(1)').valid === false, 'validateImagePath rejects javascript: scheme');
+assert(sandbox.resolveImageUrl('/assets/evil..path/pic.webp') === '', 'resolveImageUrl blocks path traversal (..)');
+
 console.log('\n========================================================');
 console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED.`);
 console.log('========================================================');
